@@ -310,7 +310,8 @@ SURVEY_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
         "Context analysis:\n{context_analysis}\n\n"
         "Raw knowledge base context:{context_section}"
         "{prior_questions_section}"
-        "{title_description_section}",
+        "{title_description_section}"
+        "{feedback_section}",
     ),
 ])
 

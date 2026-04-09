@@ -8,3 +8,25 @@ langchain-openai
 langgraph
 httpx
 python-multipart
+
+# Database
+supabase
+numpy
+scipy
+
+# Document Processing
+PyMuPDF
+spacy
+tiktoken
+python-docx
+pandas
+openpyxl
+
+# Optimizer (Claude Code as proposer agent)
+claude-agent-sdk
+
+# Web Scraping
+scrapy
+trafilatura
+requests
+firecrawl-py

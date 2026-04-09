@@ -45,6 +45,12 @@ class LLMConfig:
     PERSONA: str            = os.environ.get("LLM_PERSONA",            DEFAULT)
     ENRICHMENT: str         = os.environ.get("LLM_ENRICHMENT",         DEFAULT)
 
+    # Harness manager
+    MANAGER: str            = os.environ.get("LLM_MANAGER",            DEFAULT)
+
+    # Optimizer (Claude via Anthropic)
+    OPTIMIZER: str          = os.environ.get("LLM_OPTIMIZER",          "claude-sonnet-4-20250514")
+
     # ── Default temperatures ─────────────────────────────────────────────────
 
     class Temp:
@@ -69,6 +75,7 @@ _ROLE_MAP: dict[str, tuple[str, float]] = {
     "router":             (LLMConfig.ROUTER,             LLMConfig.Temp.ROUTING),
     "persona":            (LLMConfig.PERSONA,            LLMConfig.Temp.ANALYSIS),
     "enrichment":         (LLMConfig.ENRICHMENT,         LLMConfig.Temp.ANALYSIS),
+    "manager":            (LLMConfig.MANAGER,            LLMConfig.Temp.PRECISE),
 }
 
 

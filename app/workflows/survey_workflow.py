@@ -41,7 +41,9 @@ from app.prompts.survey_prompts import (
     get_question_type_instructions,
 )
 from app import core_client  # replaces SearchService
-# get_supabase removed � use core_client
+# get_supabase removed — use core_client
+from app.harness import run_with_harness
+from app.harness_configs import SURVEY_STEP_CONFIG, get_active_survey_config
 from app.workflows._helpers import (
     build_profile_section,
     build_questions_section,
@@ -231,29 +233,95 @@ def analyze_context(state: SurveyState) -> SurveyState:
     }
 
 
+def _build_survey_chain(genome=None):
+    """Build the survey LLM chain, optionally from a genome's prompts."""
+    from langchain_core.prompts import ChatPromptTemplate
+
+    llm = get_llm("survey_generation")
+
+    if genome is not None:
+        # Build prompt template from genome's dynamic prompts
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                genome.agent_system_prompt
+                + "{question_type_instructions}\n\n"
+                + genome.output_format_prompt
+                + "{profile_section}",
+            ),
+            (
+                "human",
+                "Survey request: {request}\n\n"
+                "Context analysis:\n{context_analysis}\n\n"
+                "Raw knowledge base context:{context_section}"
+                "{prior_questions_section}"
+                "{title_description_section}"
+                "{feedback_section}",
+            ),
+        ])
+    else:
+        prompt = SURVEY_GENERATION_PROMPT
+
+    return prompt | llm | StrOutputParser()
+
+
 def generate_survey(state: SurveyState) -> SurveyState:
-    """Generate survey questions via LLM."""
+    """Generate survey questions via LLM, with harness validation and retries."""
     question_types = state.get("question_types", ALL_QUESTION_TYPES)
     question_type_instructions = get_question_type_instructions(question_types)
 
-    llm = get_llm("survey_generation")
-    chain = SURVEY_GENERATION_PROMPT | llm | StrOutputParser()
+    # Load active genome config (falls back to hardcoded default)
+    active_config, genome_version = get_active_survey_config()
 
-    try:
-        raw_output = chain.invoke({
-            "request": state["request"],
-            "context_analysis": state.get("context_analysis", ""),
-            "context_section": state.get("context", ""),
-            "profile_section": state.get("profile_section", ""),
-            "question_type_instructions": question_type_instructions,
-            "prior_questions_section": state.get("prior_questions", ""),
-            "title_description_section": state.get("title_description_section", ""),
-        })
-    except Exception as e:
-        logger.exception("Survey generation failed")
-        return {**state, "error": str(e), "status": "failed"}
+    # Build chain — from genome prompts if a genome is active, else static
+    genome = None
+    if genome_version is not None:
+        try:
+            from app.supabase_client import get_supabase
+            from app.optimizer.genome_store import load_active_genome
+            genome = load_active_genome(get_supabase(), "survey_generation")
+        except Exception:
+            pass
 
-    return {**state, "raw_output": raw_output}
+    chain = _build_survey_chain(genome)
+
+    invoke_vars = {
+        "request": state["request"],
+        "context_analysis": state.get("context_analysis", ""),
+        "context_section": state.get("context", ""),
+        "profile_section": state.get("profile_section", ""),
+        "question_type_instructions": question_type_instructions,
+        "prior_questions_section": state.get("prior_questions", ""),
+        "title_description_section": state.get("title_description_section", ""),
+    }
+
+    def step_fn(inputs: dict, feedback_section: str):
+        raw = chain.invoke({**invoke_vars, "feedback_section": feedback_section})
+        parsed = parse_simple_json(raw)
+        # Unwrap {"questions": [...]} if needed
+        if isinstance(parsed, dict) and "questions" in parsed:
+            return parsed["questions"]
+        if isinstance(parsed, list):
+            return parsed
+        # Fallback: try direct parse
+        try:
+            result = json.loads(raw)
+            if isinstance(result, dict) and "questions" in result:
+                return result["questions"]
+            return result
+        except json.JSONDecodeError:
+            return []
+
+    result = run_with_harness(
+        step_fn,
+        {"request": state["request"], "client_profile": state.get("client_profile", {})},
+        active_config,
+    )
+    result.genome_version = genome_version
+
+    # Serialize back to raw JSON for the validate_output node
+    output = result.output if result.output is not None else []
+    return {**state, "raw_output": json.dumps(output, indent=2)}
 
 
 def validate_output(state: SurveyState) -> SurveyState:

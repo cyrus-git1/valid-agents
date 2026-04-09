@@ -8,8 +8,15 @@ from pydantic import BaseModel, Field
 
 
 class TenantScoped(BaseModel):
+    """Base for any model scoped to a tenant + client pair."""
     tenant_id: UUID
     client_id: UUID
+
+
+class TenantOwned(BaseModel):
+    """Base for models owned by a tenant with an optional client scope."""
+    tenant_id: UUID
+    client_id: Optional[UUID] = None
 
 
 class TenantScopedRequest(TenantScoped):

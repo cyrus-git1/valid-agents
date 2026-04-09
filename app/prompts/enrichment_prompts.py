@@ -39,6 +39,7 @@ GAP_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
         "human",
         "{user_request}"
         "\n\nKnowledge base excerpts:\n\n{context}"
+        "{feedback_section}"
     ),
 ])
 

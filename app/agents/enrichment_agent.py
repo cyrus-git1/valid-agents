@@ -112,6 +112,7 @@ def run_enrichment_agent(
         raw_gaps = chain.invoke({
             "context": context, "profile_section": profile_section,
             "summary_section": summary_section, "user_request": user_request,
+            "feedback_section": "",
         })
         gap_data = _parse_json(raw_gaps)
         gaps = gap_data.get("gaps", [])

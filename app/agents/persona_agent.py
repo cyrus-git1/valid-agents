@@ -72,7 +72,11 @@ def run_persona_agent(
     chain = PERSONA_EXTRACTION_PROMPT | llm | StrOutputParser()
 
     try:
-        raw = chain.invoke({"context": context, "profile_section": profile_section, "summary_section": summary_section, "user_request": user_request, "max_personas": str(max_personas)})
+        raw = chain.invoke({
+            "context": context, "profile_section": profile_section,
+            "summary_section": summary_section, "user_request": user_request,
+            "max_personas": str(max_personas), "feedback_section": "",
+        })
     except Exception as e:
         logger.exception("LLM persona extraction failed")
         return {"personas": [], "context_used": len(sorted_docs), "status": "failed", "error": f"LLM generation failed: {e}"}

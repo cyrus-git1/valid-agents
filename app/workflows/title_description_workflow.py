@@ -187,6 +187,7 @@ def generate_whole_survey(
             "question_type_instructions": question_type_instructions,
             "prior_questions_section": "",
             "title_description_section": "",
+            "feedback_section": "",
         })
     except Exception as e:
         logger.exception("Whole survey generation failed")

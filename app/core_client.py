@@ -1,8 +1,16 @@
 """
-HTTP client for the Core API.
+HTTP client for the Core API (Data Plane).
 
-Replaces all direct Supabase/SearchService/IngestService imports.
-Every data operation goes through the core API via HTTP.
+Used for data operations that still live in the core API:
+  - Vector search (semantic, graph)
+  - Transcript data access
+  - Document title resolution
+  - Survey output persistence
+
+Operations that are now local (no longer HTTP calls):
+  - Ingest (use app.services.ingest_service.IngestService)
+  - RAG/ask (use app.services.search_service.SearchService)
+  - Context summaries (use app.services.context_summary_service.ContextSummaryService)
 """
 from __future__ import annotations
 
@@ -19,7 +27,7 @@ CORE_API_URL = os.environ.get("CORE_API_URL", "http://localhost:8000")
 _TIMEOUT = 300
 
 
-# ── Search ───────────────────────────────────────────────────────────────────
+# -- Search (data plane queries) --
 
 
 def search_graph(
@@ -32,7 +40,7 @@ def search_graph(
     max_neighbours: int = 3,
     min_edge_weight: float = 0.75,
 ) -> List[Document]:
-    """KG graph-expanded search → LangChain Documents."""
+    """KG graph-expanded search via Core API -> LangChain Documents."""
     resp = _post("/search/graph", {
         "tenant_id": tenant_id,
         "client_id": client_id,
@@ -52,7 +60,7 @@ def search_semantic(
     query: str,
     top_k: int = 5,
 ) -> List[Document]:
-    """KG vector-only search → LangChain Documents."""
+    """KG vector-only search via Core API -> LangChain Documents."""
     resp = _post("/search/semantic", {
         "tenant_id": tenant_id,
         "client_id": client_id,
@@ -62,47 +70,7 @@ def search_semantic(
     return _results_to_documents(resp.get("results", []))
 
 
-def ask(
-    *,
-    tenant_id: str,
-    client_id: str,
-    question: str,
-    top_k: int = 5,
-    hop_limit: int = 1,
-    model: str = "gpt-4o-mini",
-) -> Dict[str, Any]:
-    """Full RAG: search + LLM answer."""
-    return _post("/search/ask", {
-        "tenant_id": tenant_id,
-        "client_id": client_id,
-        "question": question,
-        "top_k": top_k,
-        "hop_limit": hop_limit,
-        "model": model,
-    })
-
-
-# ── Context summaries ────────────────────────────────────────────────────────
-
-
-def get_context_summary(
-    *,
-    tenant_id: str,
-    client_id: str,
-) -> Optional[Dict[str, Any]]:
-    """Fetch context summary for a tenant+client."""
-    try:
-        resp = _get("/context/summary/get", {
-            "tenant_id": tenant_id,
-            "client_id": client_id,
-        })
-        return resp if resp.get("summary") else None
-    except Exception as e:
-        logger.warning("Failed to fetch context summary: %s", e)
-        return None
-
-
-# ── Survey outputs ───────────────────────────────────────────────────────────
+# -- Survey outputs --
 
 
 def get_survey_outputs(
@@ -153,7 +121,7 @@ def save_survey_output(
         logger.warning("Failed to save survey output: %s", e)
 
 
-# ── Transcript data ──────────────────────────────────────────────────────────
+# -- Transcript data --
 
 
 def get_transcript_chunks(
@@ -205,28 +173,7 @@ def get_document_titles(
         return {}
 
 
-# ── Ingest ───────────────────────────────────────────────────────────────────
-
-
-def ingest_web(
-    *,
-    tenant_id: str,
-    client_id: str,
-    url: str,
-    title: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Trigger web ingestion via core API."""
-    return _post("/ingest/web", {
-        "tenant_id": tenant_id,
-        "client_id": client_id,
-        "url": url,
-        "title": title,
-        "metadata": metadata or {},
-    })
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers --
 
 
 def _results_to_documents(results: List[Dict[str, Any]]) -> List[Document]:

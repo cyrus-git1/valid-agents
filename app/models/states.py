@@ -19,6 +19,34 @@ class RouterState(TypedDict, total=False):
     error: Optional[str]
 
 
+class RAGState(TypedDict, total=False):
+    question: str
+    tenant_id: str
+    client_id: str
+    client_profile: Dict[str, Any]
+    documents: List[Document]
+    context: str
+    answer: str
+    confidence: float
+    top_similarity: float
+    attempt: int
+    model: str
+
+
+class ContextBuildState(TypedDict, total=False):
+    tenant_id: str
+    client_id: str
+    docs: List[str]
+    weblinks: List[str]
+    transcripts: List[str]
+    client_profile: Dict[str, Any]
+    ingest_results: List[Dict[str, Any]]
+    documents: List[Document]
+    status: str
+    error: Optional[str]
+    warnings: List[str]
+
+
 class SurveyState(TypedDict, total=False):
     request: str
     tenant_id: str

@@ -28,6 +28,7 @@ class ArtifactType(str, Enum):
     CHAT_TRANSCRIPT = "ChatTranscript"
     CHAT_SNAPSHOT = "ChatSnapshot"
     CHUNK = "Chunk"
+    ENTITY = "Entity"
 
 
 class KnowledgeGraphNodeUpsert(TenantScoped):

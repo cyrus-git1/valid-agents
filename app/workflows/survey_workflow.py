@@ -40,10 +40,13 @@ from app.prompts.survey_prompts import (
     SURVEY_TITLE_PROMPT,
     get_question_type_instructions,
 )
-from app import core_client  # replaces SearchService
-# get_supabase removed — use core_client
-from app.harness import run_with_harness
-from app.harness_configs import SURVEY_STEP_CONFIG, get_active_survey_config
+from app.harness_pkg import run_with_harness, StepOutput
+from app.harness_pkg.configs import SURVEY_STEP_CONFIG, get_active_survey_config
+from app.tools.survey_tools import (
+    search_knowledge_base,
+    get_prior_survey_outputs,
+    analyze_survey_context,
+)
 from app.workflows._helpers import (
     build_profile_section,
     build_questions_section,
@@ -70,18 +73,33 @@ from app.workflows.title_description_workflow import (  # noqa: F401
 
 
 def retrieve_context(state: SurveyState) -> SurveyState:
-    """Retrieve context from KG via graph-expanded search."""
+    """Retrieve context from KG via search_knowledge_base tool."""
     attempt = state.get("attempt", 0) + 1
     top_k = 10 if attempt == 1 else 15
     hop_limit = 1 if attempt == 1 else 2
 
-    docs = core_client.search_graph(
-        tenant_id=state["tenant_id"],
-        client_id=state["client_id"],
-        query=state["request"],
-        top_k=top_k,
-        hop_limit=hop_limit,
-    )
+    results = search_knowledge_base.invoke({
+        "tenant_id": state["tenant_id"],
+        "client_id": state["client_id"],
+        "query": state["request"],
+        "top_k": top_k,
+        "hop_limit": hop_limit,
+    })
+
+    # Convert tool results back to Documents for downstream compatibility
+    from langchain_core.documents import Document
+    docs = [
+        Document(
+            page_content=r.get("content", ""),
+            metadata={
+                "similarity_score": r.get("similarity_score", 0.0),
+                "node_id": r.get("node_id"),
+                "document_id": r.get("document_id"),
+                "source": r.get("source", "vector"),
+            },
+        )
+        for r in results
+    ]
 
     top_sim = 0.0
     if docs:
@@ -132,15 +150,15 @@ def build_prompt(state: SurveyState) -> SurveyState:
         profile_parts.append(f"Survey Language: {demo['language']}")
     tenant_profile = "\n".join(profile_parts) if profile_parts else "No profile provided."
 
-    # Fetch prior questions via core API
+    # Fetch prior questions via tool
     prior_questions_section = ""
     try:
-        prior_outputs = core_client.get_survey_outputs(
-            tenant_id=state["tenant_id"],
-            client_id=state["client_id"],
-            output_type="survey",
-            limit=5,
-        )
+        prior_outputs = get_prior_survey_outputs.invoke({
+            "tenant_id": state["tenant_id"],
+            "client_id": state["client_id"],
+            "output_type": "survey",
+            "limit": 5,
+        })
         if prior_outputs:
             seen_labels: set[str] = set()
             prior_list: list[dict] = []
@@ -200,29 +218,15 @@ def build_prompt(state: SurveyState) -> SurveyState:
 
 
 def analyze_context(state: SurveyState) -> SurveyState:
-    """Use LLM to extract survey-relevant insights from KG context + tenant profile."""
+    """Use analyze_survey_context tool to extract survey-relevant insights."""
     context = state.get("context", "")
     tenant_profile = state.get("tenant_profile", "No profile provided.")
 
-    if not context.strip() and tenant_profile == "No profile provided.":
-        return {
-            **state,
-            "context_analysis": "No context or profile available. Generate general-purpose survey questions.",
-            "status": "generating",
-        }
-
-    llm = get_llm("context_analysis")
-    chain = CONTEXT_ANALYSIS_PROMPT | llm | StrOutputParser()
-
-    try:
-        analysis = chain.invoke({
-            "tenant_profile": tenant_profile,
-            "request": state["request"],
-            "context": context if context.strip() else "No knowledge base context available.",
-        })
-    except Exception as e:
-        logger.exception("Context analysis failed")
-        analysis = f"Analysis unavailable: {e}. Proceed with general survey design."
+    analysis = analyze_survey_context.invoke({
+        "request": state["request"],
+        "context": context,
+        "tenant_profile": tenant_profile,
+    })
 
     logger.info("Context analysis completed (%d chars) for request: %r", len(analysis), state["request"][:80])
 
@@ -296,25 +300,61 @@ def generate_survey(state: SurveyState) -> SurveyState:
     }
 
     def step_fn(inputs: dict, feedback_section: str):
-        raw = chain.invoke({**invoke_vars, "feedback_section": feedback_section})
+        # Capture the assembled prompt for tracing
+        prompt_vars = {**invoke_vars, "feedback_section": feedback_section}
+        prompt_text = (
+            f"[system]\n{invoke_vars.get('question_type_instructions', '')[:200]}...\n\n"
+            f"[human]\nRequest: {invoke_vars.get('request', '')}\n"
+            f"Context analysis: {invoke_vars.get('context_analysis', '')[:300]}...\n"
+            f"Feedback: {feedback_section[:200] if feedback_section else '(none)'}"
+        )
+
+        raw = chain.invoke(prompt_vars)
+
+        # Parse the output
         parsed = parse_simple_json(raw)
-        # Unwrap {"questions": [...]} if needed
         if isinstance(parsed, dict) and "questions" in parsed:
-            return parsed["questions"]
-        if isinstance(parsed, list):
-            return parsed
-        # Fallback: try direct parse
-        try:
-            result = json.loads(raw)
-            if isinstance(result, dict) and "questions" in result:
-                return result["questions"]
-            return result
-        except json.JSONDecodeError:
-            return []
+            questions = parsed["questions"]
+        elif isinstance(parsed, list):
+            questions = parsed
+        else:
+            try:
+                result = json.loads(raw)
+                if isinstance(result, dict) and "questions" in result:
+                    questions = result["questions"]
+                else:
+                    questions = result
+            except json.JSONDecodeError:
+                questions = []
+
+        # Collect tool calls from earlier workflow nodes
+        tool_calls = []
+        if state.get("context_used"):
+            tool_calls.append({
+                "tool": "search_knowledge_base",
+                "result_summary": f"{state.get('context_used', 0)} docs retrieved",
+            })
+        if state.get("context_analysis"):
+            tool_calls.append({
+                "tool": "analyze_survey_context",
+                "result_summary": f"{len(state.get('context_analysis', ''))} chars",
+            })
+
+        return StepOutput(
+            result=questions,
+            prompt_sent=prompt_text,
+            raw_llm_output=raw if isinstance(raw, str) else str(raw),
+            tool_calls=tool_calls,
+        )
 
     result = run_with_harness(
         step_fn,
-        {"request": state["request"], "client_profile": state.get("client_profile", {})},
+        {
+            "request": state["request"],
+            "tenant_id": state.get("tenant_id", ""),
+            "client_id": state.get("client_id", ""),
+            "client_profile": state.get("client_profile", {}),
+        },
         active_config,
     )
     result.genome_version = genome_version

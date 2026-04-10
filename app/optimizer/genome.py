@@ -46,12 +46,12 @@ def baseline_genome(step_name: str) -> HarnessGenome:
     if step_name != "survey_generation":
         raise ValueError(f"No baseline genome defined for step: {step_name}")
 
-    from app.prompts.harness_prompts import SURVEY_MANAGER_PROMPT
+    from app.harness_pkg.prompts import SURVEY_MANAGER_PROMPT
     from app.prompts.survey_prompts import (
         SURVEY_AGENT_SYSTEM_PROMPT,
         SURVEY_OUTPUT_FORMAT_PROMPT,
     )
-    from app.harness_configs import SURVEY_STEP_CONFIG
+    from app.harness_pkg.configs import SURVEY_STEP_CONFIG
 
     return HarnessGenome(
         version=0,

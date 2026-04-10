@@ -19,9 +19,11 @@ from app.models.api.admin import (
     ReindexResponse,
 )
 from app.models.api.ingest import IngestInput
-from app.models.domain.kg import KGBuildConfig
 from app.services.ingest_service import IngestService
-from app.services.kg_service import KGService
+
+# TODO: KGService has moved to the memory service
+KGService = None
+KGBuildConfig = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])

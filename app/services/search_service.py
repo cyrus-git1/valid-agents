@@ -21,7 +21,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from app.llm_config import LLMConfig
-from app.services.kg_retriever_service import KGRetrieverService
+
+# TODO: KGRetrieverService has moved to the memory service.
+# SearchService methods that depend on it will raise NotImplementedError
+# until wired to the core API endpoint.
+KGRetrieverService = None
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +72,12 @@ class SearchService:
         hop_limit: int,
         max_neighbours: int = 3,
         min_edge_weight: float = 0.75,
-    ) -> KGRetrieverService:
+    ):
+        # TODO: replace with core API endpoint call
+        raise NotImplementedError(
+            "KGRetrieverService has moved to the memory service. "
+            "Wire SearchService to the search endpoint on the core API."
+        )
         return KGRetrieverService(
             supabase_url=self._sb_url,
             supabase_key=self._sb_key,

@@ -7,8 +7,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from app.harness import CheapCheckResult, RubricDimension, StepConfig
-from app.prompts.harness_prompts import SURVEY_MANAGER_PROMPT
+from app.harness_pkg.engine import CheapCheckResult, RubricDimension, StepConfig
+from app.harness_pkg.prompts import SURVEY_MANAGER_PROMPT
 from app.prompts.survey_prompts import ALL_QUESTION_TYPES
 
 

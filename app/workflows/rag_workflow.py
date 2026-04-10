@@ -16,7 +16,8 @@ from langgraph.graph import END, StateGraph
 from app.llm_config import LLMConfig, get_llm
 from app.models.states import RAGState
 from app.prompts.retrieval_prompts import RAG_ANSWER_PROMPT
-from app.services.kg_retriever_service import KGRetrieverService
+# TODO: KGRetrieverService has moved to the memory service
+KGRetrieverService = None
 
 logger = logging.getLogger(__name__)
 

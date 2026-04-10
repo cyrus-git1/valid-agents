@@ -20,7 +20,10 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Uploa
 from supabase import Client
 
 from app.supabase_client import get_supabase
+import json as _json
+
 from app.models.api.ingest import (
+    IngestEntity,
     IngestFileResponse,
     IngestWebRequest,
     IngestWebResponse,
@@ -49,6 +52,7 @@ def _run_file_ingest(
     client_id: uuid.UUID,
     title: str | None,
     prune_after_ingest: bool,
+    entities: List[IngestEntity] | None = None,
 ) -> None:
     """Background task: full PDF/DOCX ingest pipeline."""
     _jobs[job_id] = {"status": "running"}
@@ -60,6 +64,7 @@ def _run_file_ingest(
             file_bytes=file_bytes,
             file_name=file_name,
             title=title,
+            entities=entities or [],
             prune_after_ingest=prune_after_ingest,
         ))
         _jobs[job_id] = {
@@ -68,10 +73,11 @@ def _run_file_ingest(
             "source_type": result.source_type,
             "source_uri": result.source_uri,
             "chunks_upserted": result.chunks_upserted,
+            "entities_linked": result.entities_linked,
             "warnings": result.warnings,
             "prune_result": result.prune_result,
         }
-        logger.info("Job %s complete — %d chunks", job_id, result.chunks_upserted)
+        logger.info("Job %s complete — %d chunks, %d entities", job_id, result.chunks_upserted, result.entities_linked)
     except Exception as e:
         logger.exception("Job %s failed", job_id)
         _jobs[job_id] = {"status": "failed", "detail": str(e)}
@@ -86,6 +92,7 @@ def _run_web_ingest(
     title: str | None,
     metadata: Dict[str, Any],
     prune_after_ingest: bool,
+    entities: List[IngestEntity] | None = None,
 ) -> None:
     """Background task: full web scrape + ingest pipeline."""
     _jobs[job_id] = {"status": "running"}
@@ -97,6 +104,7 @@ def _run_web_ingest(
             web_url=url,
             title=title,
             metadata=metadata,
+            entities=entities or [],
             prune_after_ingest=prune_after_ingest,
         ))
         _jobs[job_id] = {
@@ -105,10 +113,11 @@ def _run_web_ingest(
             "source_type": result.source_type,
             "source_uri": result.source_uri,
             "chunks_upserted": result.chunks_upserted,
+            "entities_linked": result.entities_linked,
             "warnings": result.warnings,
             "prune_result": result.prune_result,
         }
-        logger.info("Job %s complete — %d chunks", job_id, result.chunks_upserted)
+        logger.info("Job %s complete — %d chunks, %d entities", job_id, result.chunks_upserted, result.entities_linked)
     except Exception as e:
         logger.exception("Job %s failed", job_id)
         _jobs[job_id] = {"status": "failed", "detail": str(e)}
@@ -121,6 +130,7 @@ async def ingest_file(
     tenant_id: uuid.UUID = Form(...),
     client_id: uuid.UUID = Form(...),
     title: str | None = Form(default=None),
+    entities: str | None = Form(default=None, description='JSON array of entities: [{"name": "...", "type": "..."}]'),
     prune_after_ingest: bool = Form(default=False),
 ) -> IngestFileResponse:
     _ALLOWED_CONTENT_TYPES = {
@@ -144,6 +154,15 @@ async def ingest_file(
             status_code=400,
             detail=f"Unsupported file type '{file.content_type}' (ext='{ext}'). Send a PDF, DOCX, VTT, or XLSX.",
         )
+    # Parse entities from JSON string
+    parsed_entities: List[IngestEntity] = []
+    if entities:
+        try:
+            raw = _json.loads(entities)
+            parsed_entities = [IngestEntity(**e) for e in raw]
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid entities JSON: {e}")
+
     job_id = str(uuid.uuid4())
     sb = get_supabase()
 
@@ -154,6 +173,7 @@ async def ingest_file(
         _run_file_ingest,
         job_id, sb, file_bytes, file_name,
         tenant_id, client_id, title, prune_after_ingest,
+        parsed_entities,
     )
 
     return IngestFileResponse(
@@ -183,6 +203,7 @@ def ingest_web(
         job_id, sb, url,
         req.tenant_id, req.client_id,
         req.title, req.metadata, req.prune_after_ingest,
+        req.entities,
     )
 
     return IngestWebResponse(
@@ -205,6 +226,30 @@ def ingest_status(job_id: str) -> IngestStatusResponse:
         status=job["status"],
         detail=job.get("detail"),
     )
+
+
+@router.get("/chunks/status/{chunk_job_id}")
+def chunk_queue_status(chunk_job_id: str):
+    """Check the status of a chunk processing queue job."""
+    from app.services.chunk_queue import ChunkQueue
+    queue = ChunkQueue()
+    status = queue.get_job_status(chunk_job_id)
+    return {
+        "job_id": status.job_id,
+        "total": status.total,
+        "processed": status.processed,
+        "failed": status.failed,
+        "status": status.status,
+        "warnings": status.warnings,
+    }
+
+
+@router.post("/chunks/retry/{chunk_job_id}")
+def chunk_queue_retry(chunk_job_id: str):
+    """Retry failed chunks in a queue job."""
+    from app.services.chunk_queue import ChunkQueue
+    # TODO: wire process_fn to actual embed+store when core API endpoint is available
+    return {"error": "Retry not yet available — waiting for core API embedding endpoint."}
 
 
 # -- Batch ingest --

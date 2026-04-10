@@ -16,6 +16,8 @@ import dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.middleware.rate_limiter import RateLimiterMiddleware
+
 dotenv.load_dotenv()
 
 logging.basicConfig(
@@ -29,8 +31,9 @@ from app.routers.context_router import router as context_router
 from app.routers.search_router import router as search_router
 from app.routers.panel_router import router as panel_router
 from app.routers.admin_router import router as admin_ops_router
-from app.routers.harness_router import router as harness_router
+from app.harness_pkg.router import router as harness_router
 from app.routers.optimizer_router import router as optimizer_router
+from app.routers.kg_router import router as kg_router
 
 app = FastAPI(
     title="Valid Agent Service",
@@ -45,6 +48,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimiterMiddleware)
 
 # Existing agent routers
 app.include_router(agent_router)
@@ -60,6 +64,7 @@ app.include_router(panel_router)
 app.include_router(admin_ops_router)
 app.include_router(harness_router)
 app.include_router(optimizer_router)
+app.include_router(kg_router)
 
 
 @app.get("/health", tags=["health"])

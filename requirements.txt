@@ -11,6 +11,7 @@ python-multipart
 
 # Database
 supabase
+redis
 numpy
 scipy
 

@@ -7,12 +7,15 @@ Tier 2: Optional LLM manager evaluation with weighted rubric scoring.
 
 Each step defines a rubric — a list of named dimensions with weights.
 The manager scores each dimension individually (0.0-1.0), and the harness
-computes a deterministic weighted composite score. This means the threshold
-is grounded and consistent across steps.
+computes a deterministic weighted composite score.
+
+Execution traces capture the full LLM I/O (prompts sent, raw responses,
+tool calls) following Meta-Harness methodology — no compression, the
+optimizer reads raw traces for counterfactual diagnosis.
 
 Usage
 -----
-    from app.harness import run_with_harness, StepConfig, CheapCheckResult, RubricDimension
+    from app.harness_pkg import run_with_harness, StepConfig, CheapCheckResult, RubricDimension
 
     config = StepConfig(
         name="survey_generation",
@@ -30,6 +33,7 @@ Usage
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -41,7 +45,7 @@ from typing import Any, Callable, NamedTuple
 from pydantic import BaseModel, Field
 
 from app.llm_config import get_llm
-from app import harness_store
+from app.harness_pkg import store as harness_store
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +54,9 @@ logger = logging.getLogger(__name__)
 
 
 class HarnessStatus(str, Enum):
-    """Terminal status of a harness run."""
-    PASSED = "passed"             # output met threshold on some attempt
-    EXHAUSTED = "exhausted"       # all retries used, returning best output
-    FAILED = "failed"             # step_fn errored on every attempt, no usable output
+    PASSED = "passed"
+    EXHAUSTED = "exhausted"
+    FAILED = "failed"
 
 
 # ── Types ───────────────────────────────────────────────────────────────────
@@ -66,24 +69,19 @@ class CheapCheckResult(NamedTuple):
 
 @dataclass
 class RubricDimension:
-    """A single scoring dimension in the evaluation rubric."""
     name: str
     weight: float
     description: str
 
 
 class DimensionScore(BaseModel):
-    """Score for a single rubric dimension."""
     dimension: str = Field(description="Name of the dimension being scored")
     score: float = Field(description="Score from 0.0 (fails completely) to 1.0 (excellent)")
     reasoning: str = Field(description="Brief explanation for this score")
 
 
 class ManagerVerdict(BaseModel):
-    """Structured output from the manager LLM — scores per rubric dimension."""
-    dimension_scores: list[DimensionScore] = Field(
-        description="One score per rubric dimension"
-    )
+    dimension_scores: list[DimensionScore] = Field(description="One score per rubric dimension")
     overall_feedback: str = Field(
         description="Specific critique if quality is low. Focus on the weakest dimensions. "
         "Empty string if all dimensions pass."
@@ -92,7 +90,6 @@ class ManagerVerdict(BaseModel):
 
 @dataclass
 class StepConfig:
-    """Configuration for a single harnessed step."""
     name: str
     cheap_check: Callable[[Any], CheapCheckResult]
     manager_prompt: str
@@ -103,23 +100,73 @@ class StepConfig:
     use_manager: bool = True
 
 
+# ── Step output (for capturing raw LLM I/O) ────────────────────────────────
+
+
+@dataclass
+class StepOutput:
+    """Return this from step_fn to capture execution traces.
+
+    If step_fn returns a plain value, the harness wraps it automatically.
+    If step_fn returns a StepOutput, the harness captures the trace fields.
+
+    Usage in step_fn:
+        def step_fn(inputs, feedback_section):
+            prompt = build_prompt(...)
+            raw = llm.invoke(prompt)
+            parsed = parse(raw)
+            return StepOutput(
+                result=parsed,
+                prompt_sent=str(prompt),
+                raw_llm_output=raw,
+                tool_calls=[{"tool": "search_kb", "args": {...}, "result_summary": "5 docs"}],
+            )
+    """
+    result: Any
+    prompt_sent: str = ""
+    raw_llm_output: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    model_name: str = ""
+
+
 # ── Attempt trace ───────────────────────────────────────────────────────────
 
 
 @dataclass
 class AttemptTrace:
-    """Record of a single attempt within a harness run."""
+    """Record of a single attempt — includes full LLM I/O for Meta-Harness diagnosis."""
     attempt: int
-    started_at: str                                # ISO 8601
-    step_latency_ms: float | None = None           # step_fn wall time
-    manager_latency_ms: float | None = None        # manager eval wall time
+    started_at: str
+
+    # Timing
+    step_latency_ms: float | None = None
+    manager_latency_ms: float | None = None
+
+    # Cheap check
     cheap_check_passed: bool | None = None
     cheap_check_feedback: str = ""
+
+    # Manager eval
     manager_score: float | None = None
     dimension_breakdown: dict[str, float] = field(default_factory=dict)
     manager_feedback: str = ""
-    error: str | None = None                       # step_fn exception message
-    outcome: str = ""                              # "passed" | "cheap_check_failed" | "below_threshold" | "error"
+
+    # Errors
+    error: str | None = None
+    outcome: str = ""
+
+    # ── Execution trace (Meta-Harness fields) ───────────────────────────
+    # These capture the full LLM I/O so the optimizer can do counterfactual
+    # diagnosis on raw prompts/responses, not just scores.
+
+    prompt_sent: str = ""                          # assembled prompt → LLM
+    raw_llm_output: str = ""                       # raw LLM response before parsing
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)  # tools invoked during this step
+    model_name: str = ""                           # which model was used
+
+    # Manager I/O (separate from the generation step)
+    manager_prompt_sent: str = ""                   # system + human messages → manager LLM
+    manager_raw_response: str = ""                  # raw manager LLM response
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -144,27 +191,47 @@ class AttemptTrace:
             d["manager_feedback"] = self.manager_feedback
         if self.error:
             d["error"] = self.error
+
+        # Execution trace — always include (even if empty, so optimizer sees the structure)
+        d["execution_trace"] = {
+            "prompt_sent": self.prompt_sent,
+            "raw_llm_output": self.raw_llm_output,
+            "tool_calls": self.tool_calls,
+            "model_name": self.model_name,
+        }
+
+        # Manager I/O
+        if self.manager_prompt_sent or self.manager_raw_response:
+            d["manager_trace"] = {
+                "prompt_sent": self.manager_prompt_sent,
+                "raw_response": self.manager_raw_response,
+            }
+
         return d
 
 
-# ── Harness result ──────────────────────────────────────────────────────────
+# ── Harness result (this IS the job record) ────────────────────────────────
 
 
 @dataclass
 class HarnessResult:
-    """Wraps step output with full job trace information."""
+    """Full job record for a harness run. Persisted to Redis + Supabase."""
     output: Any
 
     # Job identity
     job_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     step_name: str = ""
 
+    # Tenant scope
+    tenant_id: str = ""
+    client_id: str = ""
+
     # Status
     status: HarnessStatus = HarnessStatus.FAILED
 
     # Timing
-    started_at: str = ""                           # ISO 8601
-    completed_at: str = ""                         # ISO 8601
+    started_at: str = ""
+    completed_at: str = ""
     total_latency_ms: float = 0.0
 
     # Summary
@@ -185,10 +252,11 @@ class HarnessResult:
     dimension_breakdowns: list[dict[str, float]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a dict for logging / API responses."""
         return {
             "job_id": self.job_id,
             "step_name": self.step_name,
+            "tenant_id": self.tenant_id,
+            "client_id": self.client_id,
             "status": self.status.value,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -207,17 +275,12 @@ class HarnessResult:
 
 
 def _build_rubric_instruction(rubric: list[RubricDimension]) -> str:
-    """Build the rubric instruction block for the manager prompt."""
     if not rubric:
         return ""
-
-    lines = [
-        "\n\nScore each of the following dimensions from 0.0 to 1.0:",
-    ]
+    lines = ["\n\nScore each of the following dimensions from 0.0 to 1.0:"]
     for dim in rubric:
         pct = int(dim.weight * 100)
         lines.append(f"- **{dim.name}** ({pct}% weight): {dim.description}")
-
     lines.append(
         "\nReturn a score for EVERY dimension listed above. "
         "Be calibrated: 0.5 = mediocre, 0.7 = acceptable, 0.9 = strong."
@@ -229,24 +292,17 @@ def _compute_weighted_score(
     verdict: ManagerVerdict,
     rubric: list[RubricDimension],
 ) -> tuple[float, dict[str, float]]:
-    """Compute weighted composite score from dimension scores.
-
-    Returns (composite_score, {dimension_name: score}).
-    """
     score_map: dict[str, float] = {}
     for ds in verdict.dimension_scores:
         score_map[ds.dimension] = max(0.0, min(1.0, ds.score))
-
     total = 0.0
     weight_sum = 0.0
     breakdown: dict[str, float] = {}
-
     for dim in rubric:
         dim_score = score_map.get(dim.name, 0.5)
         breakdown[dim.name] = dim_score
         total += dim_score * dim.weight
         weight_sum += dim.weight
-
     composite = total / weight_sum if weight_sum > 0 else 0.5
     return composite, breakdown
 
@@ -256,7 +312,6 @@ def _format_score_breakdown(
     breakdown: dict[str, float],
     rubric: list[RubricDimension],
 ) -> str:
-    """Format score breakdown for logging."""
     parts = [f"composite={composite:.2f}"]
     for dim in rubric:
         if dim.name in breakdown:
@@ -268,7 +323,6 @@ def _format_score_breakdown(
 
 
 def _format_feedback(feedback: str) -> str:
-    """Format feedback for injection into the prompt's {feedback_section}."""
     if not feedback:
         return ""
     return (
@@ -283,13 +337,8 @@ def _format_manager_feedback(
     breakdown: dict[str, float],
     rubric: list[RubricDimension],
 ) -> str:
-    """Build detailed feedback from the manager verdict for retry injection."""
     parts = []
-
-    weak_dims = [
-        dim for dim in rubric
-        if breakdown.get(dim.name, 1.0) < 0.6
-    ]
+    weak_dims = [dim for dim in rubric if breakdown.get(dim.name, 1.0) < 0.6]
     if weak_dims:
         parts.append("Weak dimensions:")
         for dim in weak_dims:
@@ -300,48 +349,60 @@ def _format_manager_feedback(
                     reasoning = ds.reasoning
                     break
             parts.append(f"- {dim.name} ({score:.1f}/1.0): {reasoning}")
-
     if verdict.overall_feedback:
         parts.append(f"\n{verdict.overall_feedback}")
-
     return "\n".join(parts) if parts else verdict.overall_feedback
 
 
 # ── Manager evaluation ──────────────────────────────────────────────────────
 
 
+@dataclass
+class _ManagerEvalResult:
+    verdict: ManagerVerdict
+    composite: float
+    breakdown: dict[str, float]
+    latency_ms: float
+    prompt_sent: str
+    raw_response: str
+
+
 def _run_manager_eval(
     output: Any,
     inputs: dict,
     config: StepConfig,
-) -> tuple[ManagerVerdict, float, dict[str, float], float]:
-    """Run the LLM manager evaluation on a step's output.
-
-    Returns (verdict, composite_score, dimension_breakdown, latency_ms).
-    """
+) -> _ManagerEvalResult:
     llm = get_llm("manager")
     structured_llm = llm.with_structured_output(ManagerVerdict)
-
     system_prompt = config.manager_prompt + _build_rubric_instruction(config.rubric)
     human_message = config.manager_context_builder(output, inputs)
-
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "human", "content": human_message},
     ]
 
+    # Capture the prompt for the trace
+    prompt_text = f"[system]\n{system_prompt}\n\n[human]\n{human_message}"
+
     t0 = time.monotonic()
     try:
         verdict = structured_llm.invoke(messages)
+        raw_response = verdict.model_dump_json()
     except Exception as e:
         latency = (time.monotonic() - t0) * 1000
         logger.warning("Manager eval failed for %s: %s — passing by default", config.name, e)
         verdict = ManagerVerdict(dimension_scores=[], overall_feedback="")
-        return verdict, 1.0, {}, latency
+        return _ManagerEvalResult(
+            verdict=verdict, composite=1.0, breakdown={},
+            latency_ms=latency, prompt_sent=prompt_text, raw_response=f"ERROR: {e}",
+        )
 
     latency = (time.monotonic() - t0) * 1000
     composite, breakdown = _compute_weighted_score(verdict, config.rubric)
-    return verdict, composite, breakdown, latency
+    return _ManagerEvalResult(
+        verdict=verdict, composite=composite, breakdown=breakdown,
+        latency_ms=latency, prompt_sent=prompt_text, raw_response=raw_response,
+    )
 
 
 # ── Main harness ────────────────────────────────────────────────────────────
@@ -358,25 +419,18 @@ def run_with_harness(
 ) -> HarnessResult:
     """Run a step function through the harness with validation and retries.
 
-    Parameters
-    ----------
-    step_fn : callable
-        Signature: (inputs: dict, feedback_section: str) -> Any
-        Called with feedback_section="" on first attempt, populated on retries.
-    inputs : dict
-        The inputs to pass to step_fn.
-    config : StepConfig
-        Step-specific configuration (cheap check, manager prompt, rubric, thresholds).
+    step_fn can return either:
+      - A plain value (the parsed output)
+      - A StepOutput instance (parsed output + raw LLM I/O for tracing)
 
-    Returns
-    -------
-    HarnessResult
-        The best output across all attempts, with full job trace.
+    The HarnessResult IS the job record — persisted to Redis + Supabase JSONL.
     """
     harness_start = time.monotonic()
     trace = HarnessResult(
         output=None,
         step_name=config.name,
+        tenant_id=inputs.get("tenant_id", ""),
+        client_id=inputs.get("client_id", ""),
         started_at=_now_iso(),
         inputs_snapshot=inputs,
     )
@@ -397,7 +451,7 @@ def run_with_harness(
         # ── Run the step ────────────────────────────────────────────────
         t0 = time.monotonic()
         try:
-            output = step_fn(inputs, feedback_section)
+            raw_result = step_fn(inputs, feedback_section)
         except Exception as e:
             attempt.step_latency_ms = (time.monotonic() - t0) * 1000
             attempt.error = str(e)
@@ -409,6 +463,16 @@ def run_with_harness(
             continue
 
         attempt.step_latency_ms = (time.monotonic() - t0) * 1000
+
+        # ── Unwrap StepOutput if returned ───────────────────────────────
+        if isinstance(raw_result, StepOutput):
+            output = raw_result.result
+            attempt.prompt_sent = raw_result.prompt_sent
+            attempt.raw_llm_output = raw_result.raw_llm_output
+            attempt.tool_calls = raw_result.tool_calls
+            attempt.model_name = raw_result.model_name
+        else:
+            output = raw_result
 
         # ── Tier 1: Cheap check ─────────────────────────────────────────
         check = config.cheap_check(output)
@@ -428,38 +492,39 @@ def run_with_harness(
 
             if best_output is None:
                 best_output = output
-
             continue
 
         # ── Tier 2: Manager eval (optional) ─────────────────────────────
         if config.use_manager and config.rubric:
             trace.used_manager = True
-            verdict, composite, breakdown, mgr_latency = _run_manager_eval(output, inputs, config)
+            mgr = _run_manager_eval(output, inputs, config)
 
-            attempt.manager_latency_ms = mgr_latency
-            attempt.manager_score = composite
-            attempt.dimension_breakdown = breakdown
-            attempt.manager_feedback = verdict.overall_feedback
+            attempt.manager_latency_ms = mgr.latency_ms
+            attempt.manager_score = mgr.composite
+            attempt.dimension_breakdown = mgr.breakdown
+            attempt.manager_feedback = mgr.verdict.overall_feedback
+            attempt.manager_prompt_sent = mgr.prompt_sent
+            attempt.manager_raw_response = mgr.raw_response
 
-            trace.scores.append(composite)
-            trace.dimension_breakdowns.append(breakdown)
+            trace.scores.append(mgr.composite)
+            trace.dimension_breakdowns.append(mgr.breakdown)
 
             logger.info(
                 "Harness: %s manager eval (attempt %d/%d): %s",
                 config.name, attempt_num, total_attempts,
-                _format_score_breakdown(composite, breakdown, config.rubric),
+                _format_score_breakdown(mgr.composite, mgr.breakdown, config.rubric),
             )
 
-            if composite > best_score:
-                best_score = composite
+            if mgr.composite > best_score:
+                best_score = mgr.composite
                 best_output = output
 
-            if composite >= config.score_threshold:
+            if mgr.composite >= config.score_threshold:
                 attempt.outcome = "passed"
                 trace.attempt_traces.append(attempt)
 
                 trace.output = output
-                trace.final_score = composite
+                trace.final_score = mgr.composite
                 trace.status = HarnessStatus.PASSED
                 trace.completed_at = _now_iso()
                 trace.total_latency_ms = (time.monotonic() - harness_start) * 1000
@@ -476,7 +541,7 @@ def run_with_harness(
             trace.attempt_traces.append(attempt)
 
             feedback_section = _format_feedback(
-                _format_manager_feedback(verdict, composite, breakdown, config.rubric)
+                _format_manager_feedback(mgr.verdict, mgr.composite, mgr.breakdown, config.rubric)
             )
         else:
             # No manager — cheap check passed, we're done

@@ -47,6 +47,27 @@ class ContextBuildState(TypedDict, total=False):
     warnings: List[str]
 
 
+class EnrichmentState(TypedDict, total=False):
+    request: str
+    tenant_id: str
+    client_id: str
+    client_profile: Dict[str, Any]
+    # Step outputs
+    kg_context: str
+    context_summary: str
+    profile_section: str
+    gaps: List[Dict[str, Any]]
+    search_results: List[Dict[str, Any]]
+    ranked_sources: List[Dict[str, Any]]
+    ingested_sources: List[Dict[str, Any]]
+    job_ids: List[str]
+    # Tracking
+    context_sampled: int
+    max_sources: int
+    status: str
+    error: Optional[str]
+
+
 class SurveyState(TypedDict, total=False):
     request: str
     tenant_id: str

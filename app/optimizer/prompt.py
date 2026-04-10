@@ -12,7 +12,7 @@ from typing import Any
 
 from app.optimizer.genome import HarnessGenome
 
-OPTIMIZER_SYSTEM_PROMPT = """You are an expert in LLM prompt engineering and evaluation rubric design. Your job is to optimize a survey generation harness by analyzing execution traces and proposing targeted changes.
+OPTIMIZER_SYSTEM_PROMPT = """You are a data scientist specializing in LLM prompt engineering and evaluation rubric design. Your job is to optimize a survey generation harness by analyzing execution traces and proposing targeted changes.
 
 ## What You're Optimizing
 

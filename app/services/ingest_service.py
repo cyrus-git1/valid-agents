@@ -21,8 +21,6 @@ import json
 import logging
 import os
 import re
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -30,11 +28,10 @@ from uuid import UUID
 from supabase import Client
 
 from app.models.api.ingest import IngestInput, IngestOutput
-from app.services.chunking_service import document_bytes_to_chunks, web_scraped_json_to_chunks
-from app.services.embedding_service import embed_texts
-from app.models.domain.kg import KGBuildConfig
-from app.services.kg_service import KGService
+from app.services.chunking_service import ChunkingService, document_bytes_to_chunks, web_scraped_json_to_chunks
+from app.services.scraper_service import ScraperService
 from app.services.context_summary_service import ContextSummaryService
+from app.services.chunk_queue import ChunkQueue, ChunkJob
 
 logger = logging.getLogger(__name__)
 
@@ -139,14 +136,6 @@ class IngestService:
             raise RuntimeError("documents insert returned no rows")
         return UUID(res.data[0]["id"])
 
-    # ── Embedding ─────────────────────────────────────────────────────────────
-
-    def _embed_in_batches(self, texts: List[str], model: str, batch_size: int) -> List[List[float]]:
-        out: List[List[float]] = []
-        for i in range(0, len(texts), batch_size):
-            out.extend(embed_texts(texts[i : i + batch_size], model=model))
-        return out
-
     # ── Chunks ────────────────────────────────────────────────────────────────
 
     def _upsert_chunk(
@@ -195,7 +184,7 @@ class IngestService:
         ).execute()
         return res.data or {}
 
-    # ── Shared embed + store ──────────────────────────────────────────────────
+    # ── Shared chunk processing ────────────────────────────────────────────────
 
     def _store_chunks(
         self,
@@ -209,46 +198,92 @@ class IngestService:
         embed_model: str,
         embed_batch_size: int,
     ) -> Tuple[List[UUID], List[str]]:
+        """Filter chunks for English content, then enqueue for embed+store via Redis.
+
+        Chunks are persisted to the Redis queue before any processing starts,
+        so nothing is lost if the process dies mid-way. The worker processes
+        each chunk independently — one failure doesn't block the others.
+        """
         warnings: List[str] = []
-        chunk_ids: List[UUID] = []
 
         if not chunks:
-            return chunk_ids, warnings
+            return [], warnings
 
-        texts = [c["text"] for c in chunks]
-        try:
-            embeddings = self._embed_in_batches(texts, model=embed_model, batch_size=embed_batch_size)
-        except Exception as e:
-            raise RuntimeError(f"Embedding failed: {e}") from e
+        # ── Language filter: strip non-English tokens, drop weak chunks ──
+        filtered_chunks = []
+        skipped_count = 0
+        for c in chunks:
+            filtered_text, should_keep = ChunkingService.filter_english_tokens(c["text"])
+            if should_keep:
+                c["text"] = filtered_text
+                c["token_count"] = ChunkingService.llm_token_len(filtered_text)
+                filtered_chunks.append(c)
+            else:
+                skipped_count += 1
 
-        if len(embeddings) != len(chunks):
-            raise RuntimeError(
-                f"Embedding count mismatch: {len(embeddings)} embeddings for {len(chunks)} chunks"
+        if skipped_count > 0:
+            warnings.append(f"Skipped {skipped_count} chunk(s) with insufficient English content.")
+            logger.info("Language filter: skipped %d/%d chunks", skipped_count, len(chunks))
+
+        chunks = filtered_chunks
+        if not chunks:
+            warnings.append("All chunks were filtered out — document may not contain English content.")
+            return [], warnings
+
+        # ── Enqueue chunks to Redis ─────────────────────────────────────
+        queue = ChunkQueue()
+        job_id = queue.enqueue_chunks(
+            chunks=chunks,
+            tenant_id=str(tenant_id),
+            client_id=str(document_id).split("-")[0],  # not used in upsert, just context
+            document_id=str(document_id),
+            source_uri=source_uri,
+            source_type=source_type,
+            extra_metadata=extra_metadata,
+            embed_model=embed_model,
+        )
+
+        # ── Process all chunks from the queue ───────────────────────────
+        # Each chunk is processed independently — if one fails, the rest
+        # still succeed and the failed one is tracked for retry.
+        def _process_chunk(job: ChunkJob) -> str:
+            """Embed and store a single chunk. Returns chunk_id string."""
+            # TODO: wire to core API embedding endpoint when available
+            # For now, store without embedding
+            chunk_id = self._upsert_chunk(
+                tenant_id=UUID(job.tenant_id),
+                document_id=UUID(job.document_id),
+                chunk_index=job.chunk_index,
+                start_page=job.start_page,
+                end_page=job.end_page,
+                text=job.text,
+                token_count=job.token_count,
+                metadata={
+                    "source_uri": job.source_uri,
+                    "source_type": job.source_type,
+                    "chunk_start_page": job.start_page,
+                    "chunk_end_page": job.end_page,
+                    **job.extra_metadata,
+                },
+                embedding=None,  # TODO: embed via core API
+            )
+            return str(chunk_id)
+
+        result = queue.process_all(job_id, _process_chunk)
+
+        chunk_ids = [UUID(cid) for cid in result.chunk_ids]
+        warnings.extend(result.warnings)
+
+        if result.failed > 0:
+            warnings.append(
+                f"{result.failed}/{result.total} chunks failed. "
+                f"Job ID for retry: {job_id}"
             )
 
-        for idx, (chunk_data, embedding) in enumerate(zip(chunks, embeddings)):
-            try:
-                chunk_id = self._upsert_chunk(
-                    tenant_id=tenant_id,
-                    document_id=document_id,
-                    chunk_index=idx,
-                    start_page=chunk_data.get("start_page"),
-                    end_page=chunk_data.get("end_page"),
-                    text=chunk_data["text"],
-                    token_count=chunk_data.get("token_count"),
-                    metadata={
-                        "source_uri": source_uri,
-                        "source_type": source_type,
-                        "chunk_start_page": chunk_data.get("start_page"),
-                        "chunk_end_page": chunk_data.get("end_page"),
-                        **extra_metadata,
-                    },
-                    embedding=embedding,
-                )
-                chunk_ids.append(chunk_id)
-            except Exception as e:
-                warnings.append(f"chunk {idx} upsert failed: {e}")
-                logger.warning("chunk %d upsert failed: %s", idx, e)
+        logger.info(
+            "Chunk queue job %s: %d/%d processed, %d failed",
+            job_id, result.processed, result.total, result.failed,
+        )
 
         return chunk_ids, warnings
 
@@ -285,8 +320,12 @@ class IngestService:
         )
         logger.info("Upserted document %s (%s)", document_id, file_name)
 
-        chunks = document_bytes_to_chunks(inp.file_bytes, file_type=file_type)
-        logger.info("Tokenized %d chunks from %s", len(chunks), file_name)
+        try:
+            chunks = document_bytes_to_chunks(inp.file_bytes, file_type=file_type)
+            logger.info("Tokenized %d chunks from %s", len(chunks), file_name)
+        except Exception as e:
+            logger.exception("Chunking failed for %s: %s", file_name, e)
+            raise RuntimeError(f"Chunking failed for {file_name}: {e}") from e
 
         if not chunks:
             return IngestOutput(
@@ -309,7 +348,7 @@ class IngestService:
             embed_batch_size=inp.embed_batch_size,
         )
 
-        return IngestOutput(
+        out = IngestOutput(
             document_id=document_id,
             source_type=file_type,
             source_uri=source_uri,
@@ -317,6 +356,8 @@ class IngestService:
             chunk_ids=chunk_ids,
             warnings=warnings,
         )
+        out._chunks_data = chunks
+        return out
 
     # ── Web ingest ────────────────────────────────────────────────────────────
 
@@ -328,35 +369,40 @@ class IngestService:
         source_type = "web"
 
         logger.info("Starting web scrape of %s", url)
-        scraped_json = _run_spider_subprocess(url)
-        total_pages = scraped_json.get("total_pages", 0)
-        logger.info("Spider collected %d pages from %s", total_pages, url)
+        scraper = ScraperService()
+        scraped = scraper.scrape(url)
+        logger.info("Scraper collected %d pages from %s", scraped.total_pages, url)
 
         document_id = self._upsert_document(
             tenant_id=inp.tenant_id,
             client_id=inp.client_id,
             source_type=source_type,
             source_uri=url,
-            title=inp.title or (scraped_json.get("pages") or [{}])[0].get("title") or url,
+            title=inp.title or (scraped.pages[0].title if scraped.pages else "") or url,
             metadata={
                 **(inp.metadata or {}),
-                "scraped_pages": total_pages,
-                "scraped_at": scraped_json.get("scraped_at"),
+                "scraped_pages": scraped.total_pages,
+                "scraped_at": scraped.scraped_at,
             },
         )
 
-        if total_pages == 0:
+        if scraped.total_pages == 0:
             return IngestOutput(
                 document_id=document_id,
                 source_type=source_type,
                 source_uri=url,
                 chunks_upserted=0,
                 chunk_ids=[],
-                warnings=["Spider returned no pages — site may block crawling."],
+                warnings=["Scraper returned no pages — site may block crawling."],
             )
 
-        chunks = web_scraped_json_to_chunks(scraped_json)
-        logger.info("Tokenized %d chunks from %s", len(chunks), url)
+        scraped_json = scraped.to_dict()
+        try:
+            chunks = web_scraped_json_to_chunks(scraped_json)
+            logger.info("Tokenized %d chunks from %s", len(chunks), url)
+        except Exception as e:
+            logger.exception("Chunking failed for web scrape %s: %s", url, e)
+            raise RuntimeError(f"Chunking failed for {url}: {e}") from e
 
         if not chunks:
             return IngestOutput(
@@ -379,7 +425,7 @@ class IngestService:
             embed_batch_size=inp.embed_batch_size,
         )
 
-        return IngestOutput(
+        out = IngestOutput(
             document_id=document_id,
             source_type=source_type,
             source_uri=url,
@@ -387,6 +433,163 @@ class IngestService:
             chunk_ids=chunk_ids,
             warnings=warnings,
         )
+        out._chunks_data = chunks
+        return out
+
+    # ── Entity linking ────────────────────────────────────────────────────────
+
+    def _link_entities(
+        self,
+        *,
+        tenant_id: UUID,
+        client_id: UUID,
+        entities: list,
+        chunk_ids: List[UUID],
+        chunks: List[JsonDict],
+        kg_svc: "KGService",
+    ) -> int:
+        """Link submitted entities to chunks that mention them.
+
+        For each entity:
+          1. Upsert an Entity KG node
+          2. Scan each chunk for mentions (case-insensitive)
+          3. Create 'mentions' edge from chunk node to entity node
+        For entity pairs that co-occur in the same chunk:
+          4. Create 'co_occurs' edge between entity nodes
+
+        Returns the total number of mention edges created.
+        """
+        if not entities or not chunk_ids or not chunks:
+            return 0
+
+        # ── Embed entity names ─────────────────────────────────────────
+        embed_texts_list = [f"{ent.type}: {ent.name}" for ent in entities]
+        try:
+            entity_embeddings = embed_texts(embed_texts_list)
+        except Exception as e:
+            logger.warning("Entity embedding failed, proceeding without: %s", e)
+            entity_embeddings = [None] * len(entities)
+
+        # ── Upsert entity nodes ─────────────────────────────────────────
+        entity_node_ids: dict[str, UUID] = {}
+        for ent, embedding in zip(entities, entity_embeddings):
+            entity_key = f"entity:{tenant_id}:{ent.name.lower().strip()}"
+            try:
+                node_id = kg_svc.upsert_node(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    node_key=entity_key,
+                    type_value="Entity",
+                    name=ent.name,
+                    description=f"{ent.type}: {ent.name}",
+                    properties={
+                        "entity_type": ent.type,
+                        **ent.properties,
+                    },
+                    embedding=embedding,
+                    status="active",
+                )
+                entity_node_ids[ent.name.lower().strip()] = node_id
+            except Exception as e:
+                logger.warning("Entity upsert failed for '%s': %s", ent.name, e)
+
+        if not entity_node_ids:
+            return 0
+
+        # ── Scan chunks for mentions ────────────────────────────────────
+        total_mentions = 0
+
+        # We need chunk node IDs — fetch them by node_key pattern
+        chunk_node_ids: dict[int, UUID] = {}
+        for idx, chunk_id in enumerate(chunk_ids):
+            # Chunk nodes use node_key=f"chunk:{chunk_id}"
+            try:
+                res = (
+                    self.sb.table("kg_nodes")
+                    .select("id")
+                    .eq("tenant_id", str(tenant_id))
+                    .eq("node_key", f"chunk:{chunk_id}")
+                    .limit(1)
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    chunk_node_ids[idx] = UUID(rows[0]["id"])
+            except Exception:
+                pass
+
+        for idx, (chunk_data, chunk_id) in enumerate(zip(chunks, chunk_ids)):
+            chunk_text_lower = chunk_data.get("text", "").lower()
+            chunk_node_id = chunk_node_ids.get(idx)
+
+            # Track which entities appear in this chunk for co-occurrence
+            entities_in_chunk: list[str] = []
+
+            for entity_name_lower, entity_node_id in entity_node_ids.items():
+                if entity_name_lower in chunk_text_lower:
+                    entities_in_chunk.append(entity_name_lower)
+
+                    if chunk_node_id:
+                        # Create mentions edge: chunk → entity
+                        try:
+                            kg_svc.upsert_edge(
+                                tenant_id=tenant_id,
+                                client_id=client_id,
+                                src_id=chunk_node_id,
+                                dst_id=entity_node_id,
+                                rel_type="mentions",
+                                weight=1.0,
+                                properties={"entity_type": next(
+                                    (e.type for e in entities if e.name.lower().strip() == entity_name_lower), ""
+                                )},
+                            )
+                            total_mentions += 1
+                        except Exception as e:
+                            logger.warning("Mentions edge failed: %s", e)
+
+                        # Link evidence
+                        try:
+                            # Extract a short quote around the mention
+                            pos = chunk_text_lower.find(entity_name_lower)
+                            start = max(0, pos - 50)
+                            end = min(len(chunk_data.get("text", "")), pos + len(entity_name_lower) + 50)
+                            quote = chunk_data.get("text", "")[start:end].strip()
+
+                            kg_svc.upsert_node_evidence(
+                                tenant_id=tenant_id,
+                                client_id=client_id,
+                                node_id=entity_node_id,
+                                chunk_id=chunk_id,
+                                quote=quote,
+                                score=1.0,
+                            )
+                        except Exception:
+                            pass
+
+            # ── Co-occurrence edges between entities in the same chunk ──
+            if len(entities_in_chunk) > 1:
+                for i_ent in range(len(entities_in_chunk)):
+                    for j_ent in range(i_ent + 1, len(entities_in_chunk)):
+                        a = entities_in_chunk[i_ent]
+                        b = entities_in_chunk[j_ent]
+                        try:
+                            kg_svc.upsert_edge(
+                                tenant_id=tenant_id,
+                                client_id=client_id,
+                                src_id=entity_node_ids[a],
+                                dst_id=entity_node_ids[b],
+                                rel_type="co_occurs",
+                                weight=1.0,
+                                properties={"source_chunk_id": str(chunk_id)},
+                            )
+                        except Exception:
+                            pass
+
+        logger.info(
+            "Entity linking: %d entities, %d mention edges for tenant=%s",
+            len(entity_node_ids), total_mentions, tenant_id,
+        )
+        return total_mentions
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -400,23 +603,21 @@ class IngestService:
                 "IngestInput requires either (file_bytes + file_name) or web_url."
             )
 
-        # Build / update KG nodes + similarity edges for this tenant
+        # Build / update KG nodes + similarity edges
+        # TODO: replace with core API endpoint call (KG build has moved to memory service)
         if result.chunks_upserted > 0:
-            try:
-                kg_svc = KGService(self.sb)
-                kg_result = kg_svc.build_kg_from_chunk_embeddings(
-                    tenant_id=inp.tenant_id,
-                    client_id=inp.client_id,
-                    config=KGBuildConfig(),
+            logger.info(
+                "KG build skipped — KGService has moved to memory service. "
+                "Wire to core API endpoint when available."
+            )
+            result.warnings.append("KG build pending — waiting for memory service endpoint.")
+
+            # Entity linking requires KG service — skip until endpoint is available
+            if inp.entities:
+                result.warnings.append(
+                    f"Entity linking skipped ({len(inp.entities)} entities) — "
+                    "waiting for memory service endpoint."
                 )
-                logger.info(
-                    "KG build — nodes=%d edges=%d",
-                    kg_result.get("nodes_upserted", 0),
-                    kg_result.get("edges_upserted", 0),
-                )
-            except Exception as e:
-                result.warnings.append(f"KG build failed: {e}")
-                logger.warning("KG build failed: %s", e)
 
             # Auto-generate / update context summary
             try:
@@ -448,33 +649,3 @@ class IngestService:
             result.document_id, result.chunks_upserted, len(result.warnings),
         )
         return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Spider subprocess runner
-# Runs app/services/scraper_service.py in a fresh subprocess on every call so
-# Scrapy's CrawlerProcess single-run-per-process limit is never hit inside
-# the long-running FastAPI server process.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _run_spider_subprocess(url: str) -> JsonDict:
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        out_path = f.name
-    try:
-        subprocess.run(
-            ["python", "app/services/scraper_service.py", url, out_path],
-            check=True,
-            capture_output=True,
-        )
-        with open(out_path, encoding="utf-8") as f:
-            return json.load(f)
-    except subprocess.CalledProcessError as e:
-        logger.error("Spider subprocess failed (exit code %d)\nstdout: %s\nstderr: %s",
-                      e.returncode, e.stdout[:2000] if e.stdout else "", e.stderr[:2000] if e.stderr else "")
-        return {"source_url": url, "scraped_at": "", "total_pages": 0, "pages": []}
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        logger.error("Spider output unreadable: %s", e)
-        return {"source_url": url, "scraped_at": "", "total_pages": 0, "pages": []}
-    finally:
-        if os.path.exists(out_path):
-            os.unlink(out_path)

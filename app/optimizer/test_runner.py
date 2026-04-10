@@ -11,8 +11,8 @@ from typing import Any
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.harness import RubricDimension, StepConfig, run_with_harness
-from app.harness_configs import cheap_check_survey, _survey_context_builder
+from app.harness_pkg import RubricDimension, StepConfig, run_with_harness
+from app.harness_pkg.configs import cheap_check_survey, _survey_context_builder
 from app.llm_config import get_llm
 from app.optimizer.genome import HarnessGenome
 from app.optimizer.models import TestResult

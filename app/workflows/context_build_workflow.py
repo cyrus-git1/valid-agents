@@ -19,7 +19,8 @@ from langgraph.graph import END, StateGraph
 from app.models.api.ingest import IngestInput, IngestOutput
 from app.models.states import ContextBuildState
 from app.services.ingest_service import IngestService
-from app.services.kg_retriever_service import KGRetrieverService
+# TODO: KGRetrieverService has moved to the memory service
+KGRetrieverService = None
 from app.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)

@@ -10,6 +10,16 @@ from pydantic import BaseModel, Field, HttpUrl
 from app.models.base import TenantScoped
 
 
+# -- Entity model --
+
+
+class IngestEntity(BaseModel):
+    """A named entity submitted alongside an ingest request."""
+    name: str = Field(..., description="Entity name (e.g., 'Acme Corp', 'John Smith')")
+    type: str = Field(..., description="Entity type (e.g., 'organization', 'person', 'product', 'topic')")
+    properties: Dict[str, Any] = Field(default_factory=dict, description="Additional properties (role, url, etc.)")
+
+
 # -- Service-layer DTOs --
 
 
@@ -28,6 +38,9 @@ class IngestInput(BaseModel):
     title: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    # Entities to link to chunks
+    entities: List[IngestEntity] = Field(default_factory=list)
+
     embed_model: str = "text-embedding-3-small"
     embed_batch_size: int = 64
     prune_after_ingest: bool = False
@@ -43,7 +56,13 @@ class IngestOutput(BaseModel):
     chunks_upserted: int
     chunk_ids: List[UUID] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
+    entities_linked: int = 0
     prune_result: Optional[Dict[str, Any]] = None
+
+    # Internal: chunk text data for entity linking (excluded from API responses)
+    _chunks_data: List[Dict[str, Any]] = []
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 # -- Router response models --
@@ -63,6 +82,7 @@ class IngestWebRequest(TenantScoped):
     url: str
     title: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    entities: List[IngestEntity] = Field(default_factory=list)
     prune_after_ingest: bool = False
 
 

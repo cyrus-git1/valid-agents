@@ -17,8 +17,9 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from supabase import Client
 
+from langchain_openai import ChatOpenAI
+
 from app.llm_config import LLMConfig
-from app.services.base_service import BaseAnalysisService
 from app.services.search_service import SearchService
 
 logger = logging.getLogger(__name__)
@@ -51,11 +52,37 @@ CONTEXT_SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
-class ContextSummaryService(BaseAnalysisService):
+class ContextSummaryService:
     """Manages context summary CRUD and LLM-powered generation."""
 
     def __init__(self, supabase: Client):
-        super().__init__(supabase)
+        self.sb = supabase
+
+    def _require_supabase(self) -> Client:
+        if self.sb is None:
+            raise RuntimeError("ContextSummaryService requires a Supabase client.")
+        return self.sb
+
+    @staticmethod
+    def _create_llm(model: str = LLMConfig.DEFAULT, temperature: float = 0.1) -> ChatOpenAI:
+        return ChatOpenAI(model=model, temperature=temperature)
+
+    @staticmethod
+    def _build_profile_section(client_profile: dict | None) -> str:
+        if not client_profile:
+            return ""
+        parts: list[str] = []
+        for key in ("industry", "headcount", "revenue", "company_name", "persona"):
+            if client_profile.get(key):
+                parts.append(f"{key.replace('_', ' ').title()}: {client_profile[key]}")
+        demo = client_profile.get("demographic", {})
+        if isinstance(demo, dict):
+            for key in ("age_range", "income_bracket", "occupation", "location"):
+                if demo.get(key):
+                    parts.append(f"{key.replace('_', ' ').title()}: {demo[key]}")
+        if not parts:
+            return ""
+        return "Company / Client Profile:\n" + "\n".join(parts) + "\n\n"
 
     # ── Read ──────────────────────────────────────────────────────────────────
 

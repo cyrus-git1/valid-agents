@@ -1,21 +1,3 @@
--- Harness trace metadata
-create table if not exists harness_traces (
-  id                   uuid primary key default gen_random_uuid(),
-  job_id               text not null unique,
-  step_name            text not null,
-  status               text not null,
-  attempts             int not null,
-  final_score          float,
-  cheap_check_failures int default 0,
-  total_latency_ms     float,
-  inputs_summary       text,
-  genome_version       int,
-  created_at           timestamptz default now()
-);
-
-create index if not exists idx_harness_traces_step
-  on harness_traces(step_name, created_at desc);
-
 -- Harness genome versions
 create table if not exists harness_genomes (
   id                   uuid primary key default gen_random_uuid(),
@@ -39,7 +21,8 @@ create table if not exists harness_genomes (
 create index if not exists idx_harness_genomes_active
   on harness_genomes(step_name) where is_active = true;
 
--- Storage bucket for full trace JSON payloads
+-- Storage bucket for trace JSONL logs (one file per step per day)
+-- Path: harness-traces/{step_name}/{YYYY-MM-DD}.jsonl
 insert into storage.buckets (id, name, public)
 values ('harness-traces', 'harness-traces', false)
 on conflict (id) do nothing;

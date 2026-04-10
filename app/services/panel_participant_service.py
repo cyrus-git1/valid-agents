@@ -32,12 +32,8 @@ from app.models.api.panel_participants import (
     PanelFilterResult,
     PanelParticipantResult,
 )
-from app.models.domain.kg import KGBuildConfig
-from app.services.base_service import BaseAnalysisService
 from app.services.chunking_service import ChunkingService
 from app.services.context_summary_service import ContextSummaryService
-from app.services.embedding_service import embed_texts
-from app.services.kg_service import KGService
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +90,55 @@ PARTICIPANT_SCORING_PROMPT = ChatPromptTemplate.from_messages([
 # ── Service ──────────────────────────────────────────────────────────────────
 
 
-class PanelParticipantService(BaseAnalysisService):
+class PanelParticipantService:
     """Ingest and filter panel participants using existing chunking/embedding infra."""
 
     def __init__(self, supabase: Client):
-        super().__init__(supabase)
+        self.sb = supabase
+
+    def _require_supabase(self) -> Client:
+        if self.sb is None:
+            raise RuntimeError("PanelParticipantService requires a Supabase client.")
+        return self.sb
+
+    @staticmethod
+    def _create_llm(model: str = "gpt-4o-mini", temperature: float = 0.1):
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model=model, temperature=temperature)
+
+    @staticmethod
+    def _parse_llm_json(raw_output: str, fallback_keys: dict | None = None) -> dict:
+        import re as _re
+        try:
+            return json.loads(raw_output)
+        except json.JSONDecodeError:
+            pass
+        match = _re.search(r"```(?:json)?\s*([\s\S]*?)```", raw_output)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        result = dict(fallback_keys or {})
+        result["raw_output"] = raw_output
+        return result
+
+    @staticmethod
+    def _build_profile_section(client_profile: dict | None) -> str:
+        if not client_profile:
+            return ""
+        parts: list[str] = []
+        for key in ("industry", "headcount", "revenue", "company_name", "persona"):
+            if client_profile.get(key):
+                parts.append(f"{key.replace('_', ' ').title()}: {client_profile[key]}")
+        demo = client_profile.get("demographic", {})
+        if isinstance(demo, dict):
+            for key in ("age_range", "income_bracket", "occupation", "location"):
+                if demo.get(key):
+                    parts.append(f"{key.replace('_', ' ').title()}: {demo[key]}")
+        if not parts:
+            return ""
+        return "Company / Client Profile:\n" + "\n".join(parts) + "\n\n"
 
     # ══════════════════════════════════════════════════════════════════════════
     # Serialization
@@ -379,10 +419,11 @@ class PanelParticipantService(BaseAnalysisService):
         self, texts: List[str], model: str, batch_size: int,
     ) -> List[List[float]]:
         """Embed texts in batches using the embedding service."""
-        out: List[List[float]] = []
-        for i in range(0, len(texts), batch_size):
-            out.extend(embed_texts(texts[i : i + batch_size], model=model))
-        return out
+        # TODO: replace with core API endpoint call
+        raise NotImplementedError(
+            "embed_texts has moved to the memory service. "
+            "Wire this to the embedding endpoint on the core API."
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Ingest
@@ -511,21 +552,9 @@ class PanelParticipantService(BaseAnalysisService):
         # Phase 4: Post-ingest KG build + context summary
         total_chunks = sum(r.chunks_upserted for r in results)
         if build_kg and total_chunks > 0:
-            try:
-                kg_svc = KGService(self._require_supabase())
-                kg_result = kg_svc.build_kg_from_chunk_embeddings(
-                    tenant_id=tenant_id,
-                    client_id=client_id,
-                    config=KGBuildConfig(),
-                )
-                logger.info(
-                    "KG build — nodes=%d edges=%d",
-                    kg_result.get("nodes_upserted", 0),
-                    kg_result.get("edges_upserted", 0),
-                )
-            except Exception as e:
-                warnings.append(f"KG build failed: {e}")
-                logger.warning("KG build failed: %s", e)
+            # TODO: replace with core API endpoint call
+            logger.info("KG build skipped — KGService has moved to memory service.")
+            warnings.append("KG build pending — waiting for memory service endpoint.")
 
             try:
                 summary_svc = ContextSummaryService(self._require_supabase())

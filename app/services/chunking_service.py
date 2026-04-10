@@ -46,6 +46,80 @@ class ChunkingService:
         text = re.sub(r"[ \t]+", " ", text)
         return text
 
+    # ── Language filtering ────────────────────────────────────────────────────
+
+    @staticmethod
+    def filter_english_tokens(
+        text: str,
+        min_english_ratio: float = 0.5,
+        min_tokens_after: int = 20,
+    ) -> tuple[str, bool]:
+        """Filter non-English tokens from text.
+
+        Removes tokens containing non-Latin script characters (CJK, Arabic,
+        Cyrillic, Devanagari, Thai, etc.). Keeps Latin-script tokens, numbers,
+        and punctuation.
+
+        Parameters
+        ----------
+        text : str
+            The chunk text to filter.
+        min_english_ratio : float
+            Minimum ratio of English tokens to total tokens. If the filtered
+            text falls below this, the chunk should be skipped.
+        min_tokens_after : int
+            Minimum token count after filtering. Chunks below this are too
+            short to be useful.
+
+        Returns
+        -------
+        (filtered_text, should_keep)
+            filtered_text has non-Latin tokens removed.
+            should_keep is False if the chunk should be dropped entirely.
+        """
+        if not text or not text.strip():
+            return "", False
+
+        # Split into whitespace-delimited tokens
+        tokens = text.split()
+        if not tokens:
+            return "", False
+
+        total = len(tokens)
+
+        # Regex: matches tokens that contain ANY non-Latin script character
+        # Covers CJK, Arabic, Hebrew, Cyrillic, Devanagari, Thai, Korean, etc.
+        _NON_LATIN_RE = re.compile(
+            r"[\u0600-\u06FF"     # Arabic
+            r"\u0400-\u04FF"      # Cyrillic
+            r"\u0900-\u097F"      # Devanagari
+            r"\u0E00-\u0E7F"      # Thai
+            r"\u3000-\u303F"      # CJK punctuation
+            r"\u3040-\u309F"      # Hiragana
+            r"\u30A0-\u30FF"      # Katakana
+            r"\u4E00-\u9FFF"      # CJK Unified Ideographs
+            r"\uAC00-\uD7AF"      # Korean Hangul
+            r"\u0590-\u05FF"      # Hebrew
+            r"\u1780-\u17FF"      # Khmer
+            r"\u1000-\u109F"      # Myanmar
+            r"]"
+        )
+
+        english_tokens = [t for t in tokens if not _NON_LATIN_RE.search(t)]
+        english_count = len(english_tokens)
+
+        if total == 0:
+            return "", False
+
+        ratio = english_count / total
+        filtered_text = " ".join(english_tokens).strip()
+
+        # Recount actual tokens after filtering
+        token_count = len(enc.encode(filtered_text)) if filtered_text else 0
+
+        should_keep = ratio >= min_english_ratio and token_count >= min_tokens_after
+        return filtered_text, should_keep
+
     # ── Page extraction ───────────────────────────────────────────────────────
 
     @staticmethod

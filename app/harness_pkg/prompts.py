@@ -26,3 +26,18 @@ SURVEY_MANAGER_PROMPT = (
     "- matrix: Rows should be related items. Columns should form a coherent scale "
     "or set of options."
 )
+
+CONTEXT_MANAGER_PROMPT = (
+    "You evaluate generated context summaries for quality. You will be given "
+    "the generated summary, its topic tags, and a sample of the knowledge base "
+    "excerpts that were used to generate it.\n\n"
+    "A good context summary:\n"
+    "- Captures the major themes present in the KB excerpts, not just one angle\n"
+    "- Uses specific details from the excerpts (company names, product names, metrics) "
+    "rather than generic business language\n"
+    "- Does not hallucinate information not present in the excerpts\n"
+    "- Reflects the client's industry and scale if a profile was provided\n"
+    "- Has topic tags that are descriptive and distinct, not vague ('technology') "
+    "or overlapping ('SaaS tools', 'SaaS platforms')\n"
+    "- Is concise — no filler phrases like 'it is worth noting' or 'importantly'"
+)

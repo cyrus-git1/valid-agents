@@ -54,6 +54,9 @@ def run_enrichment_agent(
         "sources": result.get("ingested_sources", []),
         "job_ids": result.get("job_ids", []),
         "context_sampled": result.get("context_sampled", 0),
+        "queries_used": result.get("queries_used", 0),
+        "urls_blocked": result.get("urls_blocked", []),
+        "warnings": result.get("warnings", []),
         "status": result.get("status", "complete"),
         "error": result.get("error"),
     }

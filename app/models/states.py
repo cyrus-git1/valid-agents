@@ -47,6 +47,24 @@ class ContextBuildState(TypedDict, total=False):
     warnings: List[str]
 
 
+class ContextState(TypedDict, total=False):
+    tenant_id: str
+    client_id: str
+    client_profile: Dict[str, Any]
+    force_regenerate: bool
+    # Step outputs
+    existing_summary: Optional[Dict[str, Any]]
+    kg_results: List[Dict[str, Any]]
+    kg_context: str
+    profile_section: str
+    generated_summary: Dict[str, Any]  # {summary: str, topics: list}
+    source_stats: Dict[str, Any]
+    # Tracking
+    context_sampled: int
+    status: str
+    error: Optional[str]
+
+
 class EnrichmentState(TypedDict, total=False):
     request: str
     tenant_id: str
@@ -55,6 +73,7 @@ class EnrichmentState(TypedDict, total=False):
     # Step outputs
     kg_context: str
     context_summary: str
+    context_summary_age_days: float
     profile_section: str
     gaps: List[Dict[str, Any]]
     search_results: List[Dict[str, Any]]
@@ -64,6 +83,9 @@ class EnrichmentState(TypedDict, total=False):
     # Tracking
     context_sampled: int
     max_sources: int
+    queries_used: int
+    urls_blocked: List[Dict[str, str]]
+    warnings: List[str]
     status: str
     error: Optional[str]
 

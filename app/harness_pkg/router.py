@@ -94,3 +94,46 @@ def flush_redis():
     then deletes the Redis keys. Use for archival or before shutdown.
     """
     return store.redis_flush()
+
+
+# ── Context summary (read from memory layer) ───────────────────────────────
+
+
+@router.get("/context/{tenant_id}/{client_id}")
+def get_context_summary(tenant_id: str, client_id: str):
+    """Read the stored context summary directly from Supabase.
+
+    This is the fast read path for downstream agents — no LLM call,
+    just a Supabase query. Use POST /context/summary/generate to
+    create or regenerate the summary via the context agent.
+    """
+    from uuid import UUID
+
+    try:
+        from app.supabase_client import get_supabase
+        from app.services.context_summary_service import ContextSummaryService
+
+        sb = get_supabase()
+        svc = ContextSummaryService(sb)
+        row = svc.get_summary(tenant_id=UUID(tenant_id), client_id=UUID(client_id))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read context summary: {e}")
+
+    if row is None:
+        return {
+            "has_summary": False,
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "summary": None,
+            "topics": [],
+        }
+
+    return {
+        "has_summary": True,
+        "tenant_id": tenant_id,
+        "client_id": client_id,
+        "summary": row.get("summary", ""),
+        "topics": row.get("topics", []),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }

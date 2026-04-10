@@ -1,6 +1,6 @@
 """
 Step-specific harness configurations — cheap checks, context builders,
-and StepConfig instances for survey generation.
+and StepConfig instances for survey generation and context generation.
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 from typing import Any, Dict, List
 
 from app.harness_pkg.engine import CheapCheckResult, RubricDimension, StepConfig
-from app.harness_pkg.prompts import SURVEY_MANAGER_PROMPT
+from app.harness_pkg.prompts import CONTEXT_MANAGER_PROMPT, SURVEY_MANAGER_PROMPT
 from app.prompts.survey_prompts import ALL_QUESTION_TYPES
 
 
@@ -343,3 +343,116 @@ def get_active_survey_config() -> tuple[StepConfig, int | None]:
         use_manager=True,
     )
     return config, genome.version
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Context summary generation
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cheap_check_context_summary(output: Any) -> CheapCheckResult:
+    """Structural validation for context summary output."""
+    if not isinstance(output, dict):
+        return CheapCheckResult(False, "Output must be a JSON object with 'summary' and 'topics' keys.")
+
+    summary = output.get("summary")
+    if not summary or not isinstance(summary, str):
+        return CheapCheckResult(False, "Missing or empty 'summary' field.")
+    if len(summary.strip()) < 50:
+        return CheapCheckResult(False, f"Summary is too short ({len(summary.strip())} chars). Must be at least 50.")
+
+    # Prompt leakage detection
+    lower = summary.strip().lower()
+    if lower.startswith("as an ai") or lower.startswith("i am") or lower.startswith("i'm"):
+        return CheapCheckResult(False, "Summary starts with prompt leakage ('As an AI...', 'I am...'). Regenerate.")
+
+    # Insufficient information detection — the LLM often hedges when it doesn't have enough
+    _INSUFFICIENT_SIGNALS = [
+        "no information available",
+        "no knowledge base content",
+        "insufficient data",
+        "not enough information",
+        "unable to determine",
+        "cannot be determined",
+        "no relevant content",
+        "no content available",
+        "limited information",
+        "no data to analyze",
+    ]
+    for signal in _INSUFFICIENT_SIGNALS:
+        if signal in lower:
+            return CheapCheckResult(
+                False,
+                f"Summary indicates insufficient source data ('{signal}'). "
+                "The knowledge base may not have enough content to generate a meaningful summary.",
+            )
+
+    topics = output.get("topics")
+    if not isinstance(topics, list):
+        return CheapCheckResult(False, "'topics' must be a list of strings.")
+    if len(topics) < 3:
+        return CheapCheckResult(False, f"Only {len(topics)} topics. Must have at least 3.")
+
+    for i, t in enumerate(topics):
+        if not isinstance(t, str) or not t.strip():
+            return CheapCheckResult(False, f"Topic {i} is empty or not a string.")
+        if len(t) > 50:
+            return CheapCheckResult(False, f"Topic {i} is too long ({len(t)} chars). Topics should be short tags, max 50 chars.")
+
+    # Check for generic/placeholder topics
+    _GENERIC_TOPICS = {"business", "technology", "general", "other", "misc", "various", "n/a"}
+    generic_count = sum(1 for t in topics if t.strip().lower() in _GENERIC_TOPICS)
+    if generic_count > len(topics) // 2:
+        return CheapCheckResult(
+            False,
+            f"{generic_count}/{len(topics)} topics are too generic (e.g., 'business', 'technology'). "
+            "Topics should be specific to the actual content.",
+        )
+
+    return CheapCheckResult(True)
+
+
+def _context_summary_context_builder(output: Any, inputs: dict) -> str:
+    """Build the human message for the context summary manager evaluation.
+
+    Includes the generated summary, topic tags, and a sample of the KG
+    excerpts so the manager can verify accuracy.
+    """
+    summary = output.get("summary", "") if isinstance(output, dict) else ""
+    topics = output.get("topics", []) if isinstance(output, dict) else []
+
+    # Truncate summary for the manager (full text, not a preview)
+    summary_text = summary[:1000] + "..." if len(summary) > 1000 else summary
+    topics_text = ", ".join(topics[:15])
+
+    # Include KG context sample so manager can check accuracy
+    kg_context = inputs.get("kg_context", "")
+    context_sample = kg_context[:2000] + "..." if len(kg_context) > 2000 else kg_context
+
+    profile_text = inputs.get("profile_section", "Client profile: Not provided.")
+
+    return (
+        f"{profile_text}\n\n"
+        f"Generated summary:\n{summary_text}\n\n"
+        f"Generated topics ({len(topics)}): {topics_text}\n\n"
+        f"KG excerpts used (sample):\n{context_sample}"
+    )
+
+
+CONTEXT_STEP_CONFIG = StepConfig(
+    name="context_generation",
+    cheap_check=cheap_check_context_summary,
+    manager_prompt=CONTEXT_MANAGER_PROMPT,
+    manager_context_builder=_context_summary_context_builder,
+    rubric=[
+        RubricDimension("completeness", 0.25, "Does the summary cover the major themes present in the KG excerpts?"),
+        RubricDimension("specificity", 0.20, "Are topics concrete and descriptive ('enterprise SaaS pricing', not 'business')?"),
+        RubricDimension("accuracy", 0.20, "Does the summary reflect what's actually in the excerpts, not hallucinate?"),
+        RubricDimension("profile_alignment", 0.15, "Does it reflect the client's industry, scale, and audience if profile was provided?"),
+        RubricDimension("topic_coverage", 0.10, "Do the topic tags collectively cover the breadth of the KG content?"),
+        RubricDimension("conciseness", 0.10, "Is the summary focused and not padded with generic filler?"),
+    ],
+    score_threshold=0.7,
+    max_retries=1,
+    use_manager=True,
+)

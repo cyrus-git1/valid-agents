@@ -115,11 +115,12 @@ def context_status(job_id: str) -> ContextBuildStatusResponse:
 
 @router.post("/summary/generate", response_model=ContextSummaryGenerateResponse)
 def generate_context_summary(req: ContextSummaryGenerateRequest) -> ContextSummaryGenerateResponse:
-    svc = ContextSummaryService(get_supabase())
+    from app.agents.context_agent import run_context_agent
+
     try:
-        result = svc.generate_summary(
-            tenant_id=req.tenant_id,
-            client_id=req.client_id,
+        result = run_context_agent(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
             client_profile=req.client_profile,
             force_regenerate=req.force_regenerate,
         )
@@ -127,9 +128,18 @@ def generate_context_summary(req: ContextSummaryGenerateRequest) -> ContextSumma
         logger.exception("Context summary generation failed")
         raise HTTPException(status_code=500, detail=f"Context summary generation failed: {e}")
 
-    row = result["summary_row"]
+    if result.get("status") in ("generation_failed", "store_failed"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Context generation failed"))
+
+    # Build response from agent result
+    summary_data = {
+        "tenant_id": str(req.tenant_id),
+        "client_id": str(req.client_id),
+        "summary": result.get("summary", ""),
+        "topics": result.get("topics", []),
+    }
     return ContextSummaryGenerateResponse(
-        summary=_row_to_response(row),
+        summary=_row_to_response(summary_data),
         status=result.get("status", "complete"),
         regenerated=result.get("regenerated", False),
     )

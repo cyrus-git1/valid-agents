@@ -619,21 +619,27 @@ class IngestService:
                     "waiting for memory service endpoint."
                 )
 
-            # Auto-generate / update context summary
+            # Auto-generate / update context summary via context agent (harnessed)
             try:
-                summary_svc = ContextSummaryService(self.sb)
-                summary_svc.generate_summary(
-                    tenant_id=inp.tenant_id,
-                    client_id=inp.client_id,
+                from app.agents.context_agent import run_context_agent
+                ctx_result = run_context_agent(
+                    tenant_id=str(inp.tenant_id),
+                    client_id=str(inp.client_id),
+                    client_profile=inp.metadata.get("client_profile") if inp.metadata else None,
                     force_regenerate=True,
                 )
-                logger.info(
-                    "Context summary upserted for tenant=%s client=%s",
-                    inp.tenant_id, inp.client_id,
-                )
+                if ctx_result.get("has_summary"):
+                    logger.info(
+                        "Context summary generated via agent for tenant=%s client=%s (status=%s)",
+                        inp.tenant_id, inp.client_id, ctx_result.get("status"),
+                    )
+                else:
+                    result.warnings.append(
+                        f"Context summary not generated: {ctx_result.get('error', ctx_result.get('status', 'unknown'))}"
+                    )
             except Exception as e:
-                result.warnings.append(f"Context summary generation failed: {e}")
-                logger.warning("Context summary generation failed: %s", e)
+                result.warnings.append(f"Context agent failed: {e}")
+                logger.warning("Context agent failed: %s", e)
 
         if inp.prune_after_ingest:
             try:

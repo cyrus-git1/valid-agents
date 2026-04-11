@@ -258,7 +258,7 @@ class ScraperService:
         try:
             crawl_result = app.crawl(
                 url,
-                limit=500,
+                limit=50,
                 scrape_options={"formats": ["markdown"]},
                 poll_interval=5,
             )

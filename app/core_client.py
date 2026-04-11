@@ -80,7 +80,7 @@ def get_context_summary(
 ) -> Optional[Dict[str, Any]]:
     """Fetch context summary for a tenant+client."""
     try:
-        resp = _get("/context/summary/get", {
+        resp = _get("/data/context/summary/get", {
             "tenant_id": tenant_id,
             "client_id": client_id,
         })
@@ -108,7 +108,7 @@ def get_survey_outputs(
         }
         if output_type:
             params["output_type"] = output_type
-        resp = _get("/survey/outputs", params)
+        resp = _get("/data/survey-outputs", params)
         outputs = resp.get("outputs", [])
         return outputs[:limit]
     except Exception as e:

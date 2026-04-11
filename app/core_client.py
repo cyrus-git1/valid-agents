@@ -24,7 +24,8 @@ from langchain_core.documents import Document
 logger = logging.getLogger(__name__)
 
 CORE_API_URL = os.environ.get("CORE_API_URL", "http://localhost:8000").rstrip("/")
-_TIMEOUT = 300
+_TIMEOUT = 600  # 10 minutes — large payloads (web scrapes) need time
+_CHUNK_BATCH_SIZE = 25  # send chunks in batches to avoid timeouts
 
 
 # -- Search (data plane queries) --
@@ -158,11 +159,16 @@ def ingest_document(
 ) -> Dict[str, Any]:
     """Send a processed document to the core API for storage.
 
-    The agent service handles chunking, language filtering, and NER.
-    The core API handles: file storage, document row, embedding, chunk
-    storage, KG build, and entity linking.
+    Sends chunks in batches to avoid timeouts on large documents.
+    First call creates the document + first batch of chunks.
+    Subsequent calls append chunks to the same document.
     """
     import base64
+    all_chunks = chunks or []
+    all_entities = entities or []
+
+    # First batch — includes file bytes + document creation
+    first_batch = all_chunks[:_CHUNK_BATCH_SIZE]
     payload = {
         "tenant_id": tenant_id,
         "client_id": client_id,
@@ -171,10 +177,37 @@ def ingest_document(
         "source_type": source_type,
         "title": title or file_name,
         "metadata": metadata or {},
-        "chunks": chunks or [],
-        "entities": entities or [],
+        "chunks": first_batch,
+        "entities": all_entities,
     }
-    return _post("/ingest/processed", payload)
+    result = _post("/ingest/processed", payload)
+    total_stored = len(first_batch)
+    warnings = list(result.get("warnings", []))
+
+    # Remaining batches — append chunks to the same document
+    doc_id = result.get("document_id", "")
+    for i in range(_CHUNK_BATCH_SIZE, len(all_chunks), _CHUNK_BATCH_SIZE):
+        batch = all_chunks[i:i + _CHUNK_BATCH_SIZE]
+        try:
+            batch_result = _post("/ingest/processed", {
+                "tenant_id": tenant_id,
+                "client_id": client_id,
+                "file_name": file_name,
+                "source_type": source_type,
+                "title": title or file_name,
+                "metadata": {**(metadata or {}), "append_to_document": doc_id},
+                "chunks": batch,
+                "entities": [],  # entities only sent with first batch
+            })
+            total_stored += len(batch)
+            warnings.extend(batch_result.get("warnings", []))
+        except Exception as e:
+            warnings.append(f"Chunk batch {i}-{i+len(batch)} failed: {e}")
+            logger.warning("Chunk batch %d failed: %s", i, e)
+
+    result["chunks_upserted"] = total_stored
+    result["warnings"] = warnings
+    return result
 
 
 def ingest_web_scraped(
@@ -189,18 +222,48 @@ def ingest_web_scraped(
 ) -> Dict[str, Any]:
     """Send processed web scrape data to the core API for storage.
 
-    The agent service handles scraping, chunking, language filtering, and NER.
-    The core API handles: document row, embedding, chunk storage, KG build.
+    Sends chunks in batches to avoid timeouts on large scrapes.
     """
-    return _post("/ingest/processed-web", {
+    all_chunks = chunks or []
+    all_entities = entities or []
+
+    # First batch
+    first_batch = all_chunks[:_CHUNK_BATCH_SIZE]
+    result = _post("/ingest/processed-web", {
         "tenant_id": tenant_id,
         "client_id": client_id,
         "url": url,
         "title": title or url,
         "metadata": metadata or {},
-        "chunks": chunks or [],
-        "entities": entities or [],
+        "chunks": first_batch,
+        "entities": all_entities,
     })
+    total_stored = len(first_batch)
+    warnings = list(result.get("warnings", []))
+
+    # Remaining batches
+    doc_id = result.get("document_id", "")
+    for i in range(_CHUNK_BATCH_SIZE, len(all_chunks), _CHUNK_BATCH_SIZE):
+        batch = all_chunks[i:i + _CHUNK_BATCH_SIZE]
+        try:
+            batch_result = _post("/ingest/processed-web", {
+                "tenant_id": tenant_id,
+                "client_id": client_id,
+                "url": url,
+                "title": title or url,
+                "metadata": {**(metadata or {}), "append_to_document": doc_id},
+                "chunks": batch,
+                "entities": [],
+            })
+            total_stored += len(batch)
+            warnings.extend(batch_result.get("warnings", []))
+        except Exception as e:
+            warnings.append(f"Chunk batch {i}-{i+len(batch)} failed: {e}")
+            logger.warning("Chunk batch %d failed: %s", i, e)
+
+    result["chunks_upserted"] = total_stored
+    result["warnings"] = warnings
+    return result
 
 
 def upsert_context_summary(

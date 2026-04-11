@@ -251,7 +251,7 @@ def _fallback_sequential(
         nid = r.get("node_id")
         if nid and nid not in seen:
             seen[nid] = r
-    sorted_results = sorted(seen.values(), key=lambda r: r.get("similarity_score", 0.0), reverse=True)[:15]
+    sorted_results = sorted(seen.values(), key=lambda r: r.get("similarity_score") or 0.0, reverse=True)[:15]
     context = "\n\n---\n\n".join(f"[Source {i + 1}]\n{r['content']}" for i, r in enumerate(sorted_results) if r.get("content", "").strip())
 
     summary_section = ""

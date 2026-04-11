@@ -101,7 +101,7 @@ def retrieve_kg_content(state: ContextState) -> ContextState:
 
     sorted_results = sorted(
         all_results.values(),
-        key=lambda r: r.get("similarity_score", 0.0),
+        key=lambda r: r.get("similarity_score") or 0.0,
         reverse=True,
     )[:15]
 

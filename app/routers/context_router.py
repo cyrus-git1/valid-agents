@@ -131,10 +131,15 @@ def generate_context_summary(req: ContextSummaryGenerateRequest) -> ContextSumma
 
     # Build response from agent result
     summary_data = {
+        "id": str(req.tenant_id),  # placeholder — real ID comes from core API
         "tenant_id": str(req.tenant_id),
         "client_id": str(req.client_id),
         "summary": result.get("summary", ""),
         "topics": result.get("topics", []),
+        "metadata": {},
+        "source_stats": {},
+        "created_at": None,
+        "updated_at": None,
     }
     return ContextSummaryGenerateResponse(
         summary=_row_to_response(summary_data),

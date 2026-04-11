@@ -30,8 +30,6 @@ from app.models.api.context_summary import (
     ContextSummaryDeleteResponse,
 )
 from app.workflows.context_build_workflow import build_context_graph
-from app.supabase_client import get_supabase
-from app.services.context_summary_service import ContextSummaryService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/context", tags=["context"])
@@ -147,8 +145,8 @@ def generate_context_summary(req: ContextSummaryGenerateRequest) -> ContextSumma
 
 @router.post("/summary/get", response_model=ContextSummaryResponse)
 def get_context_summary(req: ContextSummaryGetRequest) -> ContextSummaryResponse:
-    svc = ContextSummaryService(get_supabase())
-    row = svc.get_summary(tenant_id=req.tenant_id, client_id=req.client_id)
+    from app import core_client
+    row = core_client.get_context_summary(tenant_id=str(req.tenant_id), client_id=str(req.client_id))
     if row is None:
         raise HTTPException(status_code=404, detail=f"No context summary found for tenant={req.tenant_id}, client={req.client_id}.")
     return _row_to_response(row)
@@ -156,6 +154,5 @@ def get_context_summary(req: ContextSummaryGetRequest) -> ContextSummaryResponse
 
 @router.delete("/summary/{tenant_id}/{client_id}", response_model=ContextSummaryDeleteResponse)
 def delete_context_summary(tenant_id: UUID, client_id: UUID) -> ContextSummaryDeleteResponse:
-    svc = ContextSummaryService(get_supabase())
-    deleted = svc.delete_summary(tenant_id=tenant_id, client_id=client_id)
-    return ContextSummaryDeleteResponse(deleted=deleted, tenant_id=tenant_id, client_id=client_id)
+    # TODO: add core_client.delete_context_summary() when core API supports it
+    return ContextSummaryDeleteResponse(deleted=False, tenant_id=tenant_id, client_id=client_id)

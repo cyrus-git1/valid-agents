@@ -23,7 +23,7 @@ from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
-CORE_API_URL = os.environ.get("CORE_API_URL", "http://localhost:8000")
+CORE_API_URL = os.environ.get("CORE_API_URL", "http://localhost:8000").rstrip("/")
 _TIMEOUT = 300
 
 

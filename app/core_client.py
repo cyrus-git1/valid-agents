@@ -141,6 +141,88 @@ def save_survey_output(
         logger.warning("Failed to save survey output: %s", e)
 
 
+# -- Ingest (stateless — agent sends processed data, core API stores it) --
+
+
+def ingest_document(
+    *,
+    tenant_id: str,
+    client_id: str,
+    file_name: str,
+    file_bytes: bytes,
+    source_type: str,
+    title: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    chunks: Optional[List[Dict[str, Any]]] = None,
+    entities: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Send a processed document to the core API for storage.
+
+    The agent service handles chunking, language filtering, and NER.
+    The core API handles: file storage, document row, embedding, chunk
+    storage, KG build, and entity linking.
+    """
+    import base64
+    payload = {
+        "tenant_id": tenant_id,
+        "client_id": client_id,
+        "file_name": file_name,
+        "file_bytes_b64": base64.b64encode(file_bytes).decode("utf-8"),
+        "source_type": source_type,
+        "title": title or file_name,
+        "metadata": metadata or {},
+        "chunks": chunks or [],
+        "entities": entities or [],
+    }
+    return _post("/ingest/processed", payload)
+
+
+def ingest_web_scraped(
+    *,
+    tenant_id: str,
+    client_id: str,
+    url: str,
+    title: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    chunks: Optional[List[Dict[str, Any]]] = None,
+    entities: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Send processed web scrape data to the core API for storage.
+
+    The agent service handles scraping, chunking, language filtering, and NER.
+    The core API handles: document row, embedding, chunk storage, KG build.
+    """
+    return _post("/ingest/processed-web", {
+        "tenant_id": tenant_id,
+        "client_id": client_id,
+        "url": url,
+        "title": title or url,
+        "metadata": metadata or {},
+        "chunks": chunks or [],
+        "entities": entities or [],
+    })
+
+
+def upsert_context_summary(
+    *,
+    tenant_id: str,
+    client_id: str,
+    summary: str,
+    topics: List[str],
+    metadata: Optional[Dict[str, Any]] = None,
+    source_stats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Store a context summary via the core API."""
+    return _post("/data/context/summary/upsert", {
+        "tenant_id": tenant_id,
+        "client_id": client_id,
+        "summary": summary,
+        "topics": topics,
+        "metadata": metadata or {},
+        "source_stats": source_stats or {},
+    })
+
+
 # -- Transcript data --
 
 

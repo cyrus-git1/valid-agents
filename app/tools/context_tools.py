@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from uuid import UUID
 
 from langchain_core.tools import tool
 
@@ -82,24 +81,18 @@ def store_context_summary(
 ) -> Dict[str, Any]:
     """Store a validated context summary back to the memory layer.
 
-    Upserts the summary into the context_summaries table via Supabase.
-    Returns the stored row or an error.
+    Sends the summary to the core API for storage.
     """
     try:
-        from app.supabase_client import get_supabase
-        from app.services.context_summary_service import ContextSummaryService
-
-        sb = get_supabase()
-        svc = ContextSummaryService(sb)
-        row_id = svc.upsert_summary(
-            tenant_id=UUID(tenant_id),
-            client_id=UUID(client_id),
+        result = core_client.upsert_context_summary(
+            tenant_id=tenant_id,
+            client_id=client_id,
             summary=summary,
             topics=topics,
             metadata=client_profile or {},
             source_stats=source_stats or {},
         )
-        return {"status": "ok", "row_id": str(row_id)}
+        return {"status": "ok", **result}
     except Exception as e:
         logger.warning("store_context_summary failed: %s", e)
         return {"status": "error", "error": str(e)}

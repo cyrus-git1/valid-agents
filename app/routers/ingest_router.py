@@ -17,9 +17,6 @@ import logging
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from supabase import Client
-
-from app.supabase_client import get_supabase
 import json as _json
 
 from app.models.api.ingest import (
@@ -45,7 +42,6 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 
 def _run_file_ingest(
     job_id: str,
-    sb: Client,
     file_bytes: bytes,
     file_name: str,
     tenant_id: uuid.UUID,
@@ -58,7 +54,7 @@ def _run_file_ingest(
     """Background task: full PDF/DOCX ingest pipeline."""
     _jobs[job_id] = {"status": "running"}
     try:
-        svc = IngestService(sb)
+        svc = IngestService()
         result = svc.ingest(IngestInput(
             tenant_id=tenant_id,
             client_id=client_id,
@@ -87,7 +83,6 @@ def _run_file_ingest(
 
 def _run_web_ingest(
     job_id: str,
-    sb: Client,
     url: str,
     tenant_id: uuid.UUID,
     client_id: uuid.UUID,
@@ -100,7 +95,7 @@ def _run_web_ingest(
     """Background task: full web scrape + ingest pipeline."""
     _jobs[job_id] = {"status": "running"}
     try:
-        svc = IngestService(sb)
+        svc = IngestService()
         result = svc.ingest(IngestInput(
             tenant_id=tenant_id,
             client_id=client_id,
@@ -169,14 +164,13 @@ async def ingest_file(
             raise HTTPException(status_code=400, detail=f"Invalid entities JSON: {e}")
 
     job_id = str(uuid.uuid4())
-    sb = get_supabase()
 
     _EXT_TO_TYPE = {"pdf": "pdf", "docx": "docx", "vtt": "vtt", "xlsx": "xlsx", "xls": "xlsx"}
     source_type = _EXT_TO_TYPE.get(ext, ext or "file")
 
     background_tasks.add_task(
         _run_file_ingest,
-        job_id, sb, file_bytes, file_name,
+        job_id, file_bytes, file_name,
         tenant_id, client_id, title, prune_after_ingest,
         parsed_entities, extract_entities,
     )
@@ -201,11 +195,10 @@ def ingest_web(
         url = f"https://{url}"
 
     job_id = str(uuid.uuid4())
-    sb = get_supabase()
 
     background_tasks.add_task(
         _run_web_ingest,
-        job_id, sb, url,
+        job_id, url,
         req.tenant_id, req.client_id,
         req.title, req.metadata, req.prune_after_ingest,
         req.entities, req.extract_entities,
@@ -264,7 +257,6 @@ _batches: Dict[str, Dict[str, Any]] = {}
 
 def _run_batch_file_ingest(
     batch_id: str,
-    sb: Client,
     files_data: List[Dict[str, Any]],
     tenant_id: uuid.UUID,
     client_id: uuid.UUID,
@@ -273,7 +265,7 @@ def _run_batch_file_ingest(
     for i, item in enumerate(files_data):
         _batches[batch_id]["items"][i]["status"] = "running"
         try:
-            svc = IngestService(sb)
+            svc = IngestService()
             result = svc.ingest(IngestInput(
                 tenant_id=tenant_id,
                 client_id=client_id,
@@ -298,7 +290,6 @@ def _run_batch_file_ingest(
 
 def _run_batch_web_ingest(
     batch_id: str,
-    sb: Client,
     items: List[Dict[str, Any]],
     tenant_id: uuid.UUID,
     client_id: uuid.UUID,
@@ -307,7 +298,7 @@ def _run_batch_web_ingest(
     for i, item in enumerate(items):
         _batches[batch_id]["items"][i]["status"] = "running"
         try:
-            svc = IngestService(sb)
+            svc = IngestService()
             raw_url = item["url"].strip()
             if not raw_url.startswith(("http://", "https://")):
                 raw_url = f"https://{raw_url}"
@@ -366,21 +357,19 @@ async def batch_ingest_files(
         files_data.append({"file_bytes": file_bytes, "file_name": f.filename or f"upload_{uuid.uuid4().hex}.bin"})
 
     batch_id = str(uuid.uuid4())
-    sb = get_supabase()
     items = [{"index": i, "source": fd["file_name"], "status": "pending", "document_id": None, "chunks_upserted": 0, "warnings": [], "detail": None} for i, fd in enumerate(files_data)]
     _batches[batch_id] = {"status": "running", "total": len(files_data), "completed": 0, "failed": 0, "running": len(files_data), "items": items}
-    background_tasks.add_task(_run_batch_file_ingest, batch_id, sb, files_data, tenant_id, client_id, prune_after_ingest)
+    background_tasks.add_task(_run_batch_file_ingest, batch_id, files_data, tenant_id, client_id, prune_after_ingest)
     return BatchIngestResponse(batch_id=batch_id, total=len(files_data), status="running", items=[BatchItemStatus(**it) for it in items])
 
 
 @router.post("/batch/web", response_model=BatchIngestResponse, status_code=202)
 def batch_ingest_web(req: BatchWebRequest, background_tasks: BackgroundTasks) -> BatchIngestResponse:
     batch_id = str(uuid.uuid4())
-    sb = get_supabase()
     items_raw = [{"url": item.url, "title": item.title, "metadata": item.metadata} for item in req.items]
     items = [{"index": i, "source": it["url"], "status": "pending", "document_id": None, "chunks_upserted": 0, "warnings": [], "detail": None} for i, it in enumerate(items_raw)]
     _batches[batch_id] = {"status": "running", "total": len(items_raw), "completed": 0, "failed": 0, "running": len(items_raw), "items": items}
-    background_tasks.add_task(_run_batch_web_ingest, batch_id, sb, items_raw, req.tenant_id, req.client_id, req.prune_after_ingest)
+    background_tasks.add_task(_run_batch_web_ingest, batch_id, items_raw, req.tenant_id, req.client_id, req.prune_after_ingest)
     return BatchIngestResponse(batch_id=batch_id, total=len(items_raw), status="running", items=[BatchItemStatus(**it) for it in items])
 
 

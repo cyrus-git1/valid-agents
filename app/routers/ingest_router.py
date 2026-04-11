@@ -214,16 +214,16 @@ def ingest_web(
     )
 
 
-@router.get("/status/{job_id}", response_model=IngestStatusResponse)
-def ingest_status(job_id: str) -> IngestStatusResponse:
+@router.get("/status/{job_id}")
+def ingest_status(job_id: str):
+    """Get full job status including chunks, entities, and warnings."""
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-    return IngestStatusResponse(
-        job_id=job_id,
-        status=job["status"],
-        detail=job.get("detail"),
-    )
+    return {
+        "job_id": job_id,
+        **job,
+    }
 
 
 @router.get("/chunks/status/{chunk_job_id}")

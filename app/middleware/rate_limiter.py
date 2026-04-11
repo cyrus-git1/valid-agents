@@ -170,28 +170,11 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         return True, remaining, reset_at
 
     async def _extract_tenant_id(self, request: Request) -> str | None:
-        """Extract tenant_id from header or request body."""
-        # Try header first
-        tenant_id = request.headers.get("X-Tenant-ID")
-        if tenant_id:
-            return tenant_id
+        """Extract tenant_id from X-Tenant-ID header only.
 
-        # Try request body for JSON POST requests
-        if request.method == "POST" and request.headers.get("content-type", "").startswith("application/json"):
-            try:
-                body = await request.body()
-                if body:
-                    data = json.loads(body)
-                    tenant_id = data.get("tenant_id")
-                    if tenant_id:
-                        return str(tenant_id)
-            except (json.JSONDecodeError, Exception):
-                pass
-
-        # Try form data (for multipart file uploads)
-        if request.method == "POST" and "multipart" in request.headers.get("content-type", ""):
-            # Can't easily parse multipart here without consuming the body
-            # The tenant_id should be in X-Tenant-ID header for file uploads
-            pass
-
-        return None
+        We NEVER read the request body in middleware — doing so consumes
+        the stream and breaks FastAPI's body parsing for the endpoint.
+        Callers should pass X-Tenant-ID header for rate limiting.
+        If no header is present, rate limiting is skipped for this request.
+        """
+        return request.headers.get("X-Tenant-ID")

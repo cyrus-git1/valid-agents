@@ -226,28 +226,6 @@ def ingest_status(job_id: str):
     }
 
 
-@router.get("/chunks/status/{chunk_job_id}")
-def chunk_queue_status(chunk_job_id: str):
-    """Check the status of a chunk processing queue job."""
-    from app.services.chunk_queue import ChunkQueue
-    queue = ChunkQueue()
-    status = queue.get_job_status(chunk_job_id)
-    return {
-        "job_id": status.job_id,
-        "total": status.total,
-        "processed": status.processed,
-        "failed": status.failed,
-        "status": status.status,
-        "warnings": status.warnings,
-    }
-
-
-@router.post("/chunks/retry/{chunk_job_id}")
-def chunk_queue_retry(chunk_job_id: str):
-    """Retry failed chunks in a queue job."""
-    from app.services.chunk_queue import ChunkQueue
-    # TODO: wire process_fn to actual embed+store when core API endpoint is available
-    return {"error": "Retry not yet available — waiting for core API embedding endpoint."}
 
 
 # -- Batch ingest --

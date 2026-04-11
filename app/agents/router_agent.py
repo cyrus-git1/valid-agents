@@ -37,7 +37,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph
 
 from app.llm_config import get_llm
-from app.agents.retrieval_agent import run_retrieval_agent
 from app.agents.survey_agent import run_survey_agent
 from app.agents.persona_agent import run_persona_agent
 from app.agents.enrichment_agent import run_enrichment_agent
@@ -98,8 +97,8 @@ def classify_intent(state: RouterState) -> RouterState:
         confidence = 0.0
 
     # Normalize
-    if intent not in ("retrieval", "survey", "persona", "enrich", "ingest", "unknown"):
-        intent = "retrieval"  # default to retrieval
+    if intent not in ("survey", "persona", "enrich", "ingest", "unknown"):
+        intent = "unknown"  # default to unknown (retrieval removed — use search endpoint)
 
     logger.info(
         "Classified intent: %r (confidence=%.2f, attempt=%d) for input: %r",
@@ -120,18 +119,19 @@ def grade_intent(state: RouterState) -> RouterState:
 
 
 def handle_retrieval(state: RouterState) -> RouterState:
-    """Delegate to the retrieval agent."""
-    try:
-        result = run_retrieval_agent(
-            query=state["input"],
-            tenant_id=state["tenant_id"],
-            client_id=state["client_id"],
-            client_profile=state.get("client_profile"),
-        )
-        return {**state, "output": result["answer"], "sources": result.get("sources", [])}
-    except Exception as e:
-        logger.exception("Retrieval agent failed")
-        return {**state, "output": f"Retrieval failed: {e}", "error": str(e)}
+    """Redirect retrieval queries to the search endpoint."""
+    return {
+        **state,
+        "output": (
+            "For knowledge base search and question answering, use the /search/ask endpoint "
+            "on the core API. I can help you with:\n"
+            "- Generating surveys based on your content\n"
+            "- Discovering audience personas\n"
+            "- Enriching your knowledge base with web content\n"
+            "- Generating business insights reports\n\n"
+            "Please rephrase your request or use the appropriate endpoint."
+        ),
+    }
 
 
 def handle_survey(state: RouterState) -> RouterState:

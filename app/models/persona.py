@@ -30,6 +30,10 @@ class PersonaItem(BaseModel):
         default=0.5, ge=0.0, le=1.0,
         description="How much KG evidence supports this persona (0.0-1.0)",
     )
+    evidence_sources: List[str] = Field(
+        default_factory=list,
+        description="Document/node IDs from the KB that support this persona",
+    )
 
 
 class PersonaFindRequest(TenantScopedRequest):

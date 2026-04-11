@@ -70,6 +70,26 @@ def search_semantic(
     return _results_to_documents(resp.get("results", []))
 
 
+# -- Context summaries --
+
+
+def get_context_summary(
+    *,
+    tenant_id: str,
+    client_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch context summary for a tenant+client."""
+    try:
+        resp = _get("/context/summary/get", {
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+        })
+        return resp if resp.get("summary") else None
+    except Exception as e:
+        logger.warning("Failed to fetch context summary: %s", e)
+        return None
+
+
 # -- Survey outputs --
 
 

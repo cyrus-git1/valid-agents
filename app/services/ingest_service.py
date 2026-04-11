@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
+import numpy as np
+from openai import OpenAI
 from supabase import Client
 
 from app.models.api.ingest import IngestInput, IngestOutput
@@ -184,6 +186,164 @@ class IngestService:
         ).execute()
         return res.data or {}
 
+    # ── Embedding ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _embed_texts(texts: List[str], model: str = "text-embedding-3-small") -> List[List[float]]:
+        """Embed texts via OpenAI."""
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        resp = client.embeddings.create(model=model, input=texts)
+        return [d.embedding for d in resp.data]
+
+    @staticmethod
+    def _embed_in_batches(
+        texts: List[str], model: str = "text-embedding-3-small", batch_size: int = 64,
+    ) -> List[List[float]]:
+        out: List[List[float]] = []
+        for i in range(0, len(texts), batch_size):
+            out.extend(IngestService._embed_texts(texts[i:i + batch_size], model=model))
+        return out
+
+    # ── KG build (chunk nodes + similarity edges) ────────────────────────────
+
+    def _build_kg_for_chunks(
+        self,
+        *,
+        tenant_id: UUID,
+        client_id: UUID,
+        chunk_ids: List[UUID],
+        chunks: List[JsonDict],
+        similarity_threshold: float = 0.82,
+        max_edges_per_chunk: int = 10,
+    ) -> JsonDict:
+        """Create KG nodes for chunks and draw cosine-similarity edges.
+
+        Calls Supabase RPCs directly (no KGService dependency).
+        Returns summary dict with counts.
+        """
+        if not chunk_ids or not chunks:
+            return {"nodes_upserted": 0, "edges_upserted": 0}
+
+        # Fetch embeddings for stored chunks
+        all_chunk_rows = []
+        offset = 0
+        while True:
+            batch = self.sb.rpc("fetch_chunks_with_embeddings", {
+                "p_tenant_id": str(tenant_id),
+                "p_client_id": str(client_id),
+                "p_document_id": None,
+                "p_limit": 500,
+                "p_offset": offset,
+            }).execute()
+            rows = batch.data or []
+            if not rows:
+                break
+            all_chunk_rows.extend(rows)
+            if len(rows) < 500:
+                break
+            offset += 500
+
+        # Filter to valid embeddings
+        valid_chunks: List[JsonDict] = []
+        valid_embeddings: List[List[float]] = []
+        for c in all_chunk_rows:
+            emb = c.get("embedding")
+            if isinstance(emb, str):
+                try:
+                    emb = json.loads(emb)
+                    c["embedding"] = emb
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if isinstance(emb, list) and len(emb) == 1536:
+                valid_chunks.append(c)
+                valid_embeddings.append(emb)
+
+        if not valid_chunks:
+            return {"nodes_upserted": 0, "edges_upserted": 0, "note": "No chunks with valid embeddings"}
+
+        # Upsert chunk nodes
+        chunk_id_to_node_id: Dict[str, UUID] = {}
+        nodes_upserted = 0
+        for c in valid_chunks:
+            cid = c["id"]
+            preview = (c.get("content") or "")[:80].strip().replace("\n", " ")
+            try:
+                res = self.sb.rpc("upsert_kg_node", {
+                    "p_tenant_id": str(tenant_id),
+                    "p_client_id": str(client_id),
+                    "p_node_key": f"chunk:{cid}",
+                    "p_type": "Chunk",
+                    "p_name": f"Chunk {c.get('chunk_index', 0)}",
+                    "p_description": preview + ("…" if len(c.get("content", "")) > 80 else ""),
+                    "p_properties": {
+                        "chunk_id": cid,
+                        "document_id": c.get("document_id"),
+                        "chunk_index": c.get("chunk_index"),
+                    },
+                    "p_embedding": c["embedding"],
+                    "p_status": "active",
+                }).execute()
+                node_id = UUID(str(res.data))
+                chunk_id_to_node_id[cid] = node_id
+                nodes_upserted += 1
+
+                # Node evidence
+                self.sb.table("kg_node_evidence").upsert({
+                    "tenant_id": str(tenant_id),
+                    "client_id": str(client_id),
+                    "node_id": str(node_id),
+                    "chunk_id": cid,
+                    "quote": (c.get("content") or "")[:200].strip() or None,
+                    "score": 1.0,
+                }, on_conflict="tenant_id,client_id,node_id,chunk_id").execute()
+            except Exception as e:
+                logger.warning("Chunk node upsert failed for %s: %s", cid, e)
+
+        # Similarity edges
+        if len(valid_chunks) < 2:
+            return {"nodes_upserted": nodes_upserted, "edges_upserted": 0}
+
+        vectors = np.array(valid_embeddings, dtype=np.float32)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normed = vectors / norms
+        sim = normed @ normed.T
+
+        edges_upserted = 0
+        n = len(valid_chunks)
+        for i in range(n):
+            sims_i = sim[i].copy()
+            sims_i[i] = -1.0
+            cand_idx = np.where(sims_i >= similarity_threshold)[0]
+            if cand_idx.size == 0:
+                continue
+            cand_sorted = cand_idx[np.argsort(sims_i[cand_idx])[::-1]][:max_edges_per_chunk]
+            src_cid = valid_chunks[i]["id"]
+            src_nid = chunk_id_to_node_id.get(src_cid)
+            if not src_nid:
+                continue
+            for j in cand_sorted:
+                dst_cid = valid_chunks[j]["id"]
+                dst_nid = chunk_id_to_node_id.get(dst_cid)
+                if not dst_nid:
+                    continue
+                try:
+                    self.sb.rpc("upsert_kg_edge", {
+                        "p_tenant_id": str(tenant_id),
+                        "p_client_id": str(client_id),
+                        "p_src_id": str(src_nid),
+                        "p_dst_id": str(dst_nid),
+                        "p_rel_type": "related_to",
+                        "p_weight": float(sims_i[j]),
+                        "p_properties": {"method": "chunk_embedding_cosine"},
+                    }).execute()
+                    edges_upserted += 1
+                except Exception as e:
+                    logger.warning("Similarity edge failed: %s", e)
+
+        logger.info("KG build: %d nodes, %d edges for tenant=%s", nodes_upserted, edges_upserted, tenant_id)
+        return {"nodes_upserted": nodes_upserted, "edges_upserted": edges_upserted}
+
     # ── Shared chunk processing ────────────────────────────────────────────────
 
     def _store_chunks(
@@ -248,8 +408,12 @@ class IngestService:
         # still succeed and the failed one is tracked for retry.
         def _process_chunk(job: ChunkJob) -> str:
             """Embed and store a single chunk. Returns chunk_id string."""
-            # TODO: wire to core API embedding endpoint when available
-            # For now, store without embedding
+            embedding = None
+            try:
+                embedding = self._embed_texts([job.text], model=embed_model)[0]
+            except Exception as e:
+                logger.warning("Chunk embedding failed (index %d): %s", job.chunk_index, e)
+
             chunk_id = self._upsert_chunk(
                 tenant_id=UUID(job.tenant_id),
                 document_id=UUID(job.document_id),
@@ -265,7 +429,7 @@ class IngestService:
                     "chunk_end_page": job.end_page,
                     **job.extra_metadata,
                 },
-                embedding=None,  # TODO: embed via core API
+                embedding=embedding,
             )
             return str(chunk_id)
 
@@ -436,6 +600,98 @@ class IngestService:
         out._chunks_data = chunks
         return out
 
+    # ── LLM entity extraction ──────────────────────────────────────────────────
+
+    _NER_SYSTEM_PROMPT = (
+        "You are a named entity extraction system. You will receive text chunks "
+        "from a document. Extract all named entities from the text.\n\n"
+        "For each entity, return:\n"
+        "- name: the entity name as it appears in the text\n"
+        "- type: one of: person, organization, location, product, topic, concept, event, technology\n\n"
+        "Return a JSON array of objects. If no entities are found, return an empty array.\n"
+        "Only return the JSON array, no other text.\n\n"
+        "Example output:\n"
+        '[{"name": "Acme Corp", "type": "organization"}, '
+        '{"name": "John Smith", "type": "person"}, '
+        '{"name": "Toronto", "type": "location"}]'
+    )
+
+    _NER_BATCH_SIZE = 10
+
+    def _extract_entities_llm(
+        self,
+        chunks: List[JsonDict],
+        model: str = "gpt-4o-mini",
+    ) -> List[JsonDict]:
+        """Extract named entities from chunks using batched LLM calls.
+
+        Sends chunks in batches of 10 to the LLM. Returns a deduplicated
+        list of entity dicts: [{"name": "...", "type": "..."}, ...]
+        """
+        if not chunks:
+            return []
+
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        all_entities: List[JsonDict] = []
+
+        for i in range(0, len(chunks), self._NER_BATCH_SIZE):
+            batch = chunks[i:i + self._NER_BATCH_SIZE]
+
+            # Format chunks for the prompt
+            chunk_texts = []
+            for j, c in enumerate(batch):
+                text = c.get("text", "").strip()
+                if text:
+                    chunk_texts.append(f"[Chunk {i + j + 1}]\n{text}")
+
+            if not chunk_texts:
+                continue
+
+            user_content = "\n\n---\n\n".join(chunk_texts)
+
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    temperature=0,
+                    messages=[
+                        {"role": "system", "content": self._NER_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_content},
+                    ],
+                )
+                raw = resp.choices[0].message.content or "[]"
+
+                # Parse JSON — handle markdown code blocks
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+                    if match:
+                        raw = match.group(1).strip()
+
+                entities = json.loads(raw)
+                if isinstance(entities, list):
+                    all_entities.extend(entities)
+            except json.JSONDecodeError:
+                logger.warning("NER batch %d-%d returned non-JSON, skipping", i, i + len(batch))
+            except Exception as e:
+                logger.warning("NER batch %d-%d failed: %s", i, i + len(batch), e)
+
+        # Deduplicate by (lowercase name, type)
+        seen: set[tuple[str, str]] = set()
+        unique: List[JsonDict] = []
+        for ent in all_entities:
+            name = ent.get("name", "").strip()
+            etype = ent.get("type", "").strip().lower()
+            if not name or not etype:
+                continue
+            key = (name.lower(), etype)
+            if key not in seen:
+                seen.add(key)
+                unique.append({"name": name, "type": etype})
+
+        logger.info("NER extraction: %d entities from %d chunks (%d batches)",
+                    len(unique), len(chunks), (len(chunks) + self._NER_BATCH_SIZE - 1) // self._NER_BATCH_SIZE)
+        return unique
+
     # ── Entity linking ────────────────────────────────────────────────────────
 
     def _link_entities(
@@ -446,12 +702,11 @@ class IngestService:
         entities: list,
         chunk_ids: List[UUID],
         chunks: List[JsonDict],
-        kg_svc: "KGService",
     ) -> int:
         """Link submitted entities to chunks that mention them.
 
         For each entity:
-          1. Upsert an Entity KG node
+          1. Upsert an Entity KG node (with embedding)
           2. Scan each chunk for mentions (case-insensitive)
           3. Create 'mentions' edge from chunk node to entity node
         For entity pairs that co-occur in the same chunk:
@@ -465,7 +720,7 @@ class IngestService:
         # ── Embed entity names ─────────────────────────────────────────
         embed_texts_list = [f"{ent.type}: {ent.name}" for ent in entities]
         try:
-            entity_embeddings = embed_texts(embed_texts_list)
+            entity_embeddings = self._embed_texts(embed_texts_list)
         except Exception as e:
             logger.warning("Entity embedding failed, proceeding without: %s", e)
             entity_embeddings = [None] * len(entities)
@@ -475,21 +730,18 @@ class IngestService:
         for ent, embedding in zip(entities, entity_embeddings):
             entity_key = f"entity:{tenant_id}:{ent.name.lower().strip()}"
             try:
-                node_id = kg_svc.upsert_node(
-                    tenant_id=tenant_id,
-                    client_id=client_id,
-                    node_key=entity_key,
-                    type_value="Entity",
-                    name=ent.name,
-                    description=f"{ent.type}: {ent.name}",
-                    properties={
-                        "entity_type": ent.type,
-                        **ent.properties,
-                    },
-                    embedding=embedding,
-                    status="active",
-                )
-                entity_node_ids[ent.name.lower().strip()] = node_id
+                res = self.sb.rpc("upsert_kg_node", {
+                    "p_tenant_id": str(tenant_id),
+                    "p_client_id": str(client_id),
+                    "p_node_key": entity_key,
+                    "p_type": "Entity",
+                    "p_name": ent.name,
+                    "p_description": f"{ent.type}: {ent.name}",
+                    "p_properties": {"entity_type": ent.type, **ent.properties},
+                    "p_embedding": embedding,
+                    "p_status": "active",
+                }).execute()
+                entity_node_ids[ent.name.lower().strip()] = UUID(str(res.data))
             except Exception as e:
                 logger.warning("Entity upsert failed for '%s': %s", ent.name, e)
 
@@ -499,10 +751,9 @@ class IngestService:
         # ── Scan chunks for mentions ────────────────────────────────────
         total_mentions = 0
 
-        # We need chunk node IDs — fetch them by node_key pattern
+        # Fetch chunk node IDs
         chunk_node_ids: dict[int, UUID] = {}
         for idx, chunk_id in enumerate(chunk_ids):
-            # Chunk nodes use node_key=f"chunk:{chunk_id}"
             try:
                 res = (
                     self.sb.table("kg_nodes")
@@ -512,9 +763,8 @@ class IngestService:
                     .limit(1)
                     .execute()
                 )
-                rows = res.data or []
-                if rows:
-                    chunk_node_ids[idx] = UUID(rows[0]["id"])
+                if res.data:
+                    chunk_node_ids[idx] = UUID(res.data[0]["id"])
             except Exception:
                 pass
 
@@ -522,7 +772,6 @@ class IngestService:
             chunk_text_lower = chunk_data.get("text", "").lower()
             chunk_node_id = chunk_node_ids.get(idx)
 
-            # Track which entities appear in this chunk for co-occurrence
             entities_in_chunk: list[str] = []
 
             for entity_name_lower, entity_node_id in entity_node_ids.items():
@@ -530,58 +779,57 @@ class IngestService:
                     entities_in_chunk.append(entity_name_lower)
 
                     if chunk_node_id:
-                        # Create mentions edge: chunk → entity
+                        # mentions edge: chunk → entity
                         try:
-                            kg_svc.upsert_edge(
-                                tenant_id=tenant_id,
-                                client_id=client_id,
-                                src_id=chunk_node_id,
-                                dst_id=entity_node_id,
-                                rel_type="mentions",
-                                weight=1.0,
-                                properties={"entity_type": next(
+                            self.sb.rpc("upsert_kg_edge", {
+                                "p_tenant_id": str(tenant_id),
+                                "p_client_id": str(client_id),
+                                "p_src_id": str(chunk_node_id),
+                                "p_dst_id": str(entity_node_id),
+                                "p_rel_type": "mentions",
+                                "p_weight": 1.0,
+                                "p_properties": {"entity_type": next(
                                     (e.type for e in entities if e.name.lower().strip() == entity_name_lower), ""
                                 )},
-                            )
+                            }).execute()
                             total_mentions += 1
                         except Exception as e:
                             logger.warning("Mentions edge failed: %s", e)
 
-                        # Link evidence
+                        # Evidence quote
                         try:
-                            # Extract a short quote around the mention
                             pos = chunk_text_lower.find(entity_name_lower)
                             start = max(0, pos - 50)
                             end = min(len(chunk_data.get("text", "")), pos + len(entity_name_lower) + 50)
                             quote = chunk_data.get("text", "")[start:end].strip()
 
-                            kg_svc.upsert_node_evidence(
-                                tenant_id=tenant_id,
-                                client_id=client_id,
-                                node_id=entity_node_id,
-                                chunk_id=chunk_id,
-                                quote=quote,
-                                score=1.0,
-                            )
+                            self.sb.table("kg_node_evidence").upsert({
+                                "tenant_id": str(tenant_id),
+                                "client_id": str(client_id),
+                                "node_id": str(entity_node_id),
+                                "chunk_id": str(chunk_id),
+                                "quote": quote,
+                                "score": 1.0,
+                            }, on_conflict="tenant_id,client_id,node_id,chunk_id").execute()
                         except Exception:
                             pass
 
-            # ── Co-occurrence edges between entities in the same chunk ──
+            # Co-occurrence edges
             if len(entities_in_chunk) > 1:
                 for i_ent in range(len(entities_in_chunk)):
                     for j_ent in range(i_ent + 1, len(entities_in_chunk)):
                         a = entities_in_chunk[i_ent]
                         b = entities_in_chunk[j_ent]
                         try:
-                            kg_svc.upsert_edge(
-                                tenant_id=tenant_id,
-                                client_id=client_id,
-                                src_id=entity_node_ids[a],
-                                dst_id=entity_node_ids[b],
-                                rel_type="co_occurs",
-                                weight=1.0,
-                                properties={"source_chunk_id": str(chunk_id)},
-                            )
+                            self.sb.rpc("upsert_kg_edge", {
+                                "p_tenant_id": str(tenant_id),
+                                "p_client_id": str(client_id),
+                                "p_src_id": str(entity_node_ids[a]),
+                                "p_dst_id": str(entity_node_ids[b]),
+                                "p_rel_type": "co_occurs",
+                                "p_weight": 1.0,
+                                "p_properties": {"source_chunk_id": str(chunk_id)},
+                            }).execute()
                         except Exception:
                             pass
 
@@ -603,23 +851,69 @@ class IngestService:
                 "IngestInput requires either (file_bytes + file_name) or web_url."
             )
 
-        # Build / update KG nodes + similarity edges
-        # TODO: replace with core API endpoint call (KG build has moved to memory service)
+        # Build KG chunk nodes + similarity edges
         if result.chunks_upserted > 0:
-            logger.info(
-                "KG build skipped — KGService has moved to memory service. "
-                "Wire to core API endpoint when available."
-            )
-            result.warnings.append("KG build pending — waiting for memory service endpoint.")
-
-            # Entity linking requires KG service — skip until endpoint is available
-            if inp.entities:
-                result.warnings.append(
-                    f"Entity linking skipped ({len(inp.entities)} entities) — "
-                    "waiting for memory service endpoint."
+            try:
+                kg_result = self._build_kg_for_chunks(
+                    tenant_id=inp.tenant_id,
+                    client_id=inp.client_id,
+                    chunk_ids=result.chunk_ids,
+                    chunks=result._chunks_data,
                 )
+                logger.info(
+                    "KG build — nodes=%d edges=%d",
+                    kg_result.get("nodes_upserted", 0),
+                    kg_result.get("edges_upserted", 0),
+                )
+            except Exception as e:
+                result.warnings.append(f"KG build failed: {e}")
+                logger.warning("KG build failed: %s", e)
 
-            # Auto-generate / update context summary via context agent (harnessed)
+            # Extract entities via LLM NER + merge with submitted entities
+            from app.models.api.ingest import IngestEntity
+
+            all_entities = list(inp.entities)  # start with submitted entities
+
+            if inp.extract_entities and result._chunks_data:
+                try:
+                    extracted = self._extract_entities_llm(result._chunks_data)
+                    # Merge: deduplicate against submitted entities
+                    existing_keys = {
+                        (e.name.lower().strip(), e.type.lower().strip())
+                        for e in all_entities
+                    }
+                    for ent in extracted:
+                        key = (ent["name"].lower().strip(), ent["type"].lower().strip())
+                        if key not in existing_keys:
+                            existing_keys.add(key)
+                            all_entities.append(IngestEntity(
+                                name=ent["name"],
+                                type=ent["type"],
+                            ))
+                    logger.info(
+                        "NER: %d extracted + %d submitted = %d total entities",
+                        len(extracted), len(inp.entities), len(all_entities),
+                    )
+                except Exception as e:
+                    result.warnings.append(f"NER extraction failed: {e}")
+                    logger.warning("NER extraction failed: %s", e)
+
+            # Link all entities (submitted + extracted) to chunks
+            if all_entities and result._chunks_data:
+                try:
+                    entities_linked = self._link_entities(
+                        tenant_id=inp.tenant_id,
+                        client_id=inp.client_id,
+                        entities=all_entities,
+                        chunk_ids=result.chunk_ids,
+                        chunks=result._chunks_data,
+                    )
+                    result.entities_linked = entities_linked
+                except Exception as e:
+                    result.warnings.append(f"Entity linking failed: {e}")
+                    logger.warning("Entity linking failed: %s", e)
+
+            # Auto-generate / update context summary via context agent
             try:
                 from app.agents.context_agent import run_context_agent
                 ctx_result = run_context_agent(

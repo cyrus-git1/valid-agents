@@ -41,6 +41,9 @@ class IngestInput(BaseModel):
     # Entities to link to chunks
     entities: List[IngestEntity] = Field(default_factory=list)
 
+    # NER extraction — run LLM entity extraction on chunks
+    extract_entities: bool = Field(default=True, description="Run LLM-based NER on chunks to auto-extract entities")
+
     embed_model: str = "text-embedding-3-small"
     embed_batch_size: int = 64
     prune_after_ingest: bool = False
@@ -83,6 +86,7 @@ class IngestWebRequest(TenantScoped):
     title: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     entities: List[IngestEntity] = Field(default_factory=list)
+    extract_entities: bool = Field(default=True, description="Run LLM-based NER on chunks")
     prune_after_ingest: bool = False
 
 

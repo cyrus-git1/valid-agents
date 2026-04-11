@@ -27,6 +27,58 @@ SURVEY_MANAGER_PROMPT = (
     "or set of options."
 )
 
+GAP_ANALYSIS_MANAGER_PROMPT = (
+    "You evaluate knowledge gap analyses for quality. You will be given "
+    "the user's request, the identified gaps with their search queries, "
+    "and the KB context that was used to identify them.\n\n"
+    "A good gap analysis:\n"
+    "- Identifies concrete, specific topics ('competitor pricing in enterprise SaaS') "
+    "not vague categories ('marketing data', 'more information')\n"
+    "- Gaps relate to what the user asked about and what the KB is missing\n"
+    "- Search queries are specific enough to find useful web content, not generic\n"
+    "- Priority levels (high/medium/low) reflect actual business importance\n"
+    "- Gaps are distinct from each other, not overlapping"
+)
+
+URL_RANKING_MANAGER_PROMPT = (
+    "You evaluate URL ranking results for quality. You will be given "
+    "the gap being filled, the search results that were available, and "
+    "the URLs that were selected with their rankings.\n\n"
+    "A good URL ranking:\n"
+    "- Selected URLs directly address the gap topic, not tangentially related\n"
+    "- Sources are authoritative (industry reports, official docs, established blogs) "
+    "not low-quality (content farms, thin affiliate sites)\n"
+    "- Relevance reasons are specific ('covers enterprise SaaS pricing benchmarks') "
+    "not generic ('useful article about the topic')\n"
+    "- Selected URLs collectively cover different angles of the gap"
+)
+
+PERSONA_MANAGER_PROMPT = (
+    "You evaluate extracted audience personas for quality. You will be given "
+    "the generated personas with their evidence sources, and the user's request.\n\n"
+    "A good persona set:\n"
+    "- Each persona is meaningfully distinct — not variations of the same archetype\n"
+    "- Personas are grounded in specific KB content, not generic marketing templates\n"
+    "- evidence_sources reference real document/node IDs, not made up\n"
+    "- Motivations and pain points have real detail, not filler like 'wants a good experience'\n"
+    "- Demographics are specific when the data supports it\n"
+    "- Confidence scores reflect actual evidence density — not all 0.8"
+)
+
+INSIGHTS_MANAGER_PROMPT = (
+    "You evaluate business insights reports for quality. You will be given "
+    "the report's executive summary, key findings, recommendations, and metadata "
+    "about which data sources were used.\n\n"
+    "A good insights report:\n"
+    "- Findings are backed by specific evidence from the analyses, not generic claims\n"
+    "- Cross-references insights across multiple data sources (sentiment confirms strategic theme)\n"
+    "- Recommendations are specific and implementable, not vague advice\n"
+    "- Covers all available data sources, not just one\n"
+    "- References personas when findings affect specific audiences\n"
+    "- data_gaps clearly states what's missing and the impact\n"
+    "- executive_summary synthesizes, not just lists findings"
+)
+
 CONTEXT_MANAGER_PROMPT = (
     "You evaluate generated context summaries for quality. You will be given "
     "the generated summary, its topic tags, and a sample of the knowledge base "

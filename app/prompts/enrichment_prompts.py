@@ -71,5 +71,6 @@ URL_RANKING_PROMPT = ChatPromptTemplate.from_messages([
         "Gap to fill: {gap_topic}\n"
         "Reason: {gap_reason}\n\n"
         "Search results:\n{search_results}"
+        "{feedback_section}"
     ),
 ])

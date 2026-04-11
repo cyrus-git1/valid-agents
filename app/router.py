@@ -98,11 +98,17 @@ def find_personas(req: PersonaFindRequest) -> PersonaFindResponse:
         PersonaItem(name=p["name"], description=p["description"],
                     demographics=PersonaDemographics(**p.get("demographics", {})),
                     motivations=p.get("motivations", []), pain_points=p.get("pain_points", []),
-                    behaviors=p.get("behaviors", []), confidence=p.get("confidence", 0.5))
+                    behaviors=p.get("behaviors", []), confidence=p.get("confidence", 0.5),
+                    evidence_sources=p.get("evidence_sources", []))
         for p in result.get("personas", [])
     ]
-    return PersonaFindResponse(personas=personas, context_used=result.get("context_used", 0),
-                               status=result.get("status", "complete"), error=result.get("error"))
+    metadata = result.get("metadata", {})
+    return PersonaFindResponse(
+        personas=personas,
+        context_used=metadata.get("context_sampled", 0),
+        status=result.get("status", "complete"),
+        error=result.get("error"),
+    )
 
 
 # ── Enrichment ───────────────────────────────────────────────────────────────

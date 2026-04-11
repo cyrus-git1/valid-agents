@@ -53,6 +53,7 @@ def _run_file_ingest(
     title: str | None,
     prune_after_ingest: bool,
     entities: List[IngestEntity] | None = None,
+    extract_entities: bool = True,
 ) -> None:
     """Background task: full PDF/DOCX ingest pipeline."""
     _jobs[job_id] = {"status": "running"}
@@ -65,6 +66,7 @@ def _run_file_ingest(
             file_name=file_name,
             title=title,
             entities=entities or [],
+            extract_entities=extract_entities,
             prune_after_ingest=prune_after_ingest,
         ))
         _jobs[job_id] = {
@@ -93,6 +95,7 @@ def _run_web_ingest(
     metadata: Dict[str, Any],
     prune_after_ingest: bool,
     entities: List[IngestEntity] | None = None,
+    extract_entities: bool = True,
 ) -> None:
     """Background task: full web scrape + ingest pipeline."""
     _jobs[job_id] = {"status": "running"}
@@ -105,6 +108,7 @@ def _run_web_ingest(
             title=title,
             metadata=metadata,
             entities=entities or [],
+            extract_entities=extract_entities,
             prune_after_ingest=prune_after_ingest,
         ))
         _jobs[job_id] = {
@@ -131,6 +135,7 @@ async def ingest_file(
     client_id: uuid.UUID = Form(...),
     title: str | None = Form(default=None),
     entities: str | None = Form(default=None, description='JSON array of entities: [{"name": "...", "type": "..."}]'),
+    extract_entities: bool = Form(default=True, description="Run LLM-based NER to auto-extract entities from chunks"),
     prune_after_ingest: bool = Form(default=False),
 ) -> IngestFileResponse:
     _ALLOWED_CONTENT_TYPES = {
@@ -173,7 +178,7 @@ async def ingest_file(
         _run_file_ingest,
         job_id, sb, file_bytes, file_name,
         tenant_id, client_id, title, prune_after_ingest,
-        parsed_entities,
+        parsed_entities, extract_entities,
     )
 
     return IngestFileResponse(
@@ -203,7 +208,7 @@ def ingest_web(
         job_id, sb, url,
         req.tenant_id, req.client_id,
         req.title, req.metadata, req.prune_after_ingest,
-        req.entities,
+        req.entities, req.extract_entities,
     )
 
     return IngestWebResponse(

@@ -23,15 +23,18 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
+from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph
 
+from app.llm_config import get_llm
 from app.models.states import EnrichmentState
 from app.analysis.base import BaseAnalysisService
+from app.harness_pkg import run_with_harness, StepOutput
+from app.harness_pkg.configs import GAP_ANALYSIS_STEP_CONFIG, URL_RANKING_STEP_CONFIG
+from app.prompts.enrichment_prompts import GAP_ANALYSIS_PROMPT, URL_RANKING_PROMPT
 from app.tools.enrichment_tools import (
-    analyze_knowledge_gaps,
     get_context_summary,
     ingest_web_url,
-    rank_web_sources,
     search_knowledge_base,
     web_search,
 )
@@ -231,25 +234,71 @@ def sample_coverage(state: EnrichmentState) -> EnrichmentState:
 
 
 def analyze_gaps(state: EnrichmentState) -> EnrichmentState:
-    """Use LLM to identify knowledge gaps."""
+    """Use LLM to identify knowledge gaps — harnessed with quality gating."""
     user_request = (
         state.get("request")
         or "Identify gaps in this knowledge base and suggest areas to enrich with external data."
     )
 
-    result = analyze_knowledge_gaps.invoke({
-        "context": state.get("kg_context", "(Knowledge base is sparse.)"),
-        "profile_section": state.get("profile_section", ""),
-        "summary_section": state.get("context_summary", ""),
-        "user_request": user_request,
-    })
+    context = state.get("kg_context", "(Knowledge base is sparse.)")
+    profile_section = state.get("profile_section", "")
+    summary_section = state.get("context_summary", "")
 
-    gaps = result.get("gaps", [])
+    llm = get_llm("enrichment")
+    chain = GAP_ANALYSIS_PROMPT | llm | StrOutputParser()
+
+    invoke_vars = {
+        "context": context,
+        "profile_section": profile_section,
+        "summary_section": summary_section,
+        "user_request": user_request,
+    }
+
+    def step_fn(inputs: dict, feedback_section: str):
+        import json as _json
+        prompt_text = f"[system] Gap analysis prompt\n[human] Request: {user_request[:200]}\nContext: {len(context)} chars\nFeedback: {feedback_section[:200] if feedback_section else '(none)'}"
+
+        raw = chain.invoke({**invoke_vars, "feedback_section": feedback_section})
+
+        # Parse JSON
+        try:
+            parsed = _json.loads(raw)
+        except _json.JSONDecodeError:
+            import re as _re
+            match = _re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+            if match:
+                try:
+                    parsed = _json.loads(match.group(1))
+                except _json.JSONDecodeError:
+                    parsed = {"gaps": []}
+            else:
+                parsed = {"gaps": []}
+
+        return StepOutput(
+            result=parsed,
+            prompt_sent=prompt_text,
+            raw_llm_output=raw if isinstance(raw, str) else str(raw),
+            tool_calls=[{"tool": "search_knowledge_base", "result_summary": f"{state.get('context_sampled', 0)} docs"}],
+        )
+
+    harness_result = run_with_harness(
+        step_fn,
+        {
+            "tenant_id": state.get("tenant_id", ""),
+            "client_id": state.get("client_id", ""),
+            "user_request": user_request,
+            "kg_context": context,
+        },
+        GAP_ANALYSIS_STEP_CONFIG,
+    )
+
+    output = harness_result.output if harness_result.output else {}
+    gaps = output.get("gaps", []) if isinstance(output, dict) else []
 
     if not gaps:
         return {**state, "gaps": [], "status": "no_gaps"}
 
-    logger.info("Enrichment: identified %d gaps", len(gaps))
+    logger.info("Enrichment: identified %d gaps (harness: %s)", len(gaps), harness_result.status.value)
 
     return {**state, "gaps": gaps[:5], "status": "gaps_identified"}
 
@@ -471,9 +520,12 @@ def validate_results(state: EnrichmentState) -> EnrichmentState:
 
 
 def rank_sources(state: EnrichmentState) -> EnrichmentState:
-    """Rank search results by relevance and quality per gap."""
+    """Rank search results by relevance and quality per gap — harnessed."""
     max_sources = state.get("max_sources", 5)
     ranked: List[Dict[str, Any]] = []
+
+    llm = get_llm("enrichment")
+    chain = URL_RANKING_PROMPT | llm | StrOutputParser()
 
     for gap_search in state.get("search_results", []):
         search_results_text = "\n".join(
@@ -481,14 +533,57 @@ def rank_sources(state: EnrichmentState) -> EnrichmentState:
             for r in gap_search["results"]
         )
 
-        result = rank_web_sources.invoke({
+        max_urls = max(1, max_sources // max(len(state.get("search_results", [])), 1))
+
+        invoke_vars = {
             "gap_topic": gap_search["gap_topic"],
             "gap_reason": gap_search["gap_reason"],
-            "search_results_text": search_results_text,
-            "max_urls": max(1, max_sources // max(len(state.get("search_results", [])), 1)),
-        })
+            "search_results": search_results_text,
+            "max_urls": str(max_urls),
+        }
 
-        for url_item in result.get("urls", []):
+        def step_fn(inputs: dict, feedback_section: str):
+            import json as _json
+            prompt_text = (
+                f"[system] URL ranking\n[human] Gap: {gap_search['gap_topic']}\n"
+                f"{len(gap_search['results'])} results\nFeedback: {feedback_section[:200] if feedback_section else '(none)'}"
+            )
+
+            raw = chain.invoke({**invoke_vars, "feedback_section": feedback_section})
+
+            try:
+                parsed = _json.loads(raw)
+            except _json.JSONDecodeError:
+                import re as _re
+                match = _re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+                if match:
+                    try:
+                        parsed = _json.loads(match.group(1))
+                    except _json.JSONDecodeError:
+                        parsed = {"urls": []}
+                else:
+                    parsed = {"urls": []}
+
+            return StepOutput(
+                result=parsed,
+                prompt_sent=prompt_text,
+                raw_llm_output=raw if isinstance(raw, str) else str(raw),
+            )
+
+        harness_result = run_with_harness(
+            step_fn,
+            {
+                "tenant_id": state.get("tenant_id", ""),
+                "client_id": state.get("client_id", ""),
+                "gap_topic": gap_search["gap_topic"],
+                "gap_reason": gap_search["gap_reason"],
+                "search_results_text": search_results_text,
+            },
+            URL_RANKING_STEP_CONFIG,
+        )
+
+        output = harness_result.output if harness_result.output else {}
+        for url_item in output.get("urls", []) if isinstance(output, dict) else []:
             url_item["gap_topic"] = gap_search["gap_topic"]
             ranked.append(url_item)
 

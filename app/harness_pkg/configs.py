@@ -8,7 +8,14 @@ import json
 from typing import Any, Dict, List
 
 from app.harness_pkg.engine import CheapCheckResult, RubricDimension, StepConfig
-from app.harness_pkg.prompts import CONTEXT_MANAGER_PROMPT, SURVEY_MANAGER_PROMPT
+from app.harness_pkg.prompts import (
+    CONTEXT_MANAGER_PROMPT,
+    GAP_ANALYSIS_MANAGER_PROMPT,
+    INSIGHTS_MANAGER_PROMPT,
+    PERSONA_MANAGER_PROMPT,
+    SURVEY_MANAGER_PROMPT,
+    URL_RANKING_MANAGER_PROMPT,
+)
 from app.prompts.survey_prompts import ALL_QUESTION_TYPES
 
 
@@ -451,6 +458,396 @@ CONTEXT_STEP_CONFIG = StepConfig(
         RubricDimension("profile_alignment", 0.15, "Does it reflect the client's industry, scale, and audience if profile was provided?"),
         RubricDimension("topic_coverage", 0.10, "Do the topic tags collectively cover the breadth of the KG content?"),
         RubricDimension("conciseness", 0.10, "Is the summary focused and not padded with generic filler?"),
+    ],
+    score_threshold=0.7,
+    max_retries=1,
+    use_manager=True,
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Enrichment: gap analysis
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cheap_check_gap_analysis(output: Any) -> CheapCheckResult:
+    """Structural validation for gap analysis output."""
+    if not isinstance(output, dict):
+        return CheapCheckResult(False, "Output must be a JSON object with a 'gaps' key.")
+
+    gaps = output.get("gaps")
+    if not isinstance(gaps, list) or len(gaps) == 0:
+        return CheapCheckResult(False, "No gaps identified. Must return at least 1 gap.")
+
+    for i, gap in enumerate(gaps):
+        if not isinstance(gap, dict):
+            return CheapCheckResult(False, f"Gap {i} is not an object.")
+        if not gap.get("topic"):
+            return CheapCheckResult(False, f"Gap {i} is missing a 'topic' field.")
+        if not gap.get("reason"):
+            return CheapCheckResult(False, f"Gap {i} is missing a 'reason' field.")
+
+        # Topic must be specific, not a single generic word
+        topic = gap["topic"].strip()
+        if len(topic.split()) < 2:
+            return CheapCheckResult(False, f"Gap {i} topic '{topic}' is too vague. Must be at least 2 words.")
+
+        # Must have search queries
+        queries = gap.get("search_queries", [])
+        if not isinstance(queries, list) or len(queries) == 0:
+            return CheapCheckResult(False, f"Gap {i} ('{topic}') has no search_queries.")
+        for j, q in enumerate(queries):
+            if not isinstance(q, str) or len(q.strip()) < 5:
+                return CheapCheckResult(False, f"Gap {i} search_query {j} is too short or empty.")
+
+        # Priority must be valid
+        priority = gap.get("priority", "")
+        if priority and priority not in ("high", "medium", "low"):
+            return CheapCheckResult(False, f"Gap {i} has invalid priority '{priority}'. Must be high/medium/low.")
+
+    return CheapCheckResult(True)
+
+
+def _gap_analysis_context_builder(output: Any, inputs: dict) -> str:
+    """Build the human message for the gap analysis manager evaluation."""
+    gaps = output.get("gaps", []) if isinstance(output, dict) else []
+
+    gap_details = []
+    for i, g in enumerate(gaps):
+        queries = g.get("search_queries", [])
+        gap_details.append(
+            f"{i + 1}. [{g.get('priority', '?')}] {g.get('topic', '?')}\n"
+            f"   Reason: {g.get('reason', '?')}\n"
+            f"   Queries: {', '.join(queries[:3])}"
+        )
+
+    gaps_text = "\n".join(gap_details)
+    user_request = inputs.get("user_request", "(none)")
+    kg_context = inputs.get("kg_context", "")
+    context_sample = kg_context[:1500] + "..." if len(kg_context) > 1500 else kg_context
+
+    return (
+        f"User request: {user_request}\n\n"
+        f"Identified {len(gaps)} gaps:\n{gaps_text}\n\n"
+        f"KB context used (sample):\n{context_sample}"
+    )
+
+
+GAP_ANALYSIS_STEP_CONFIG = StepConfig(
+    name="gap_analysis",
+    cheap_check=cheap_check_gap_analysis,
+    manager_prompt=GAP_ANALYSIS_MANAGER_PROMPT,
+    manager_context_builder=_gap_analysis_context_builder,
+    rubric=[
+        RubricDimension("specificity", 0.30, "Are gaps concrete topics ('competitor pricing in enterprise SaaS') not vague ('marketing data')?"),
+        RubricDimension("relevance", 0.25, "Do gaps relate to the user's request and what the KB is actually missing?"),
+        RubricDimension("actionability", 0.25, "Would the search queries realistically find useful web content to fill each gap?"),
+        RubricDimension("priority_calibration", 0.20, "Are priority levels (high/medium/low) reasonable given the context?"),
+    ],
+    score_threshold=0.7,
+    max_retries=1,
+    use_manager=True,
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Enrichment: URL ranking
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cheap_check_url_ranking(output: Any) -> CheapCheckResult:
+    """Structural validation for URL ranking output."""
+    if not isinstance(output, dict):
+        return CheapCheckResult(False, "Output must be a JSON object with a 'urls' key.")
+
+    urls = output.get("urls")
+    if not isinstance(urls, list):
+        return CheapCheckResult(False, "'urls' must be a list.")
+
+    # Empty is ok — means no URLs worth ingesting
+    if len(urls) == 0:
+        return CheapCheckResult(True)
+
+    for i, item in enumerate(urls):
+        if not isinstance(item, dict):
+            return CheapCheckResult(False, f"URL entry {i} is not an object.")
+        if not item.get("url"):
+            return CheapCheckResult(False, f"URL entry {i} is missing 'url' field.")
+        if not item.get("relevance_reason"):
+            return CheapCheckResult(False, f"URL entry {i} is missing 'relevance_reason' field.")
+
+        # Relevance reason must be substantive
+        reason = item["relevance_reason"].strip()
+        if len(reason) < 10:
+            return CheapCheckResult(
+                False,
+                f"URL entry {i} relevance_reason is too short ({len(reason)} chars). "
+                "Must explain specifically why this URL is relevant.",
+            )
+
+        # Priority must be a number
+        priority = item.get("priority")
+        if priority is not None:
+            try:
+                int(priority)
+            except (ValueError, TypeError):
+                return CheapCheckResult(False, f"URL entry {i} priority '{priority}' is not a number.")
+
+    return CheapCheckResult(True)
+
+
+def _url_ranking_context_builder(output: Any, inputs: dict) -> str:
+    """Build the human message for the URL ranking manager evaluation."""
+    urls = output.get("urls", []) if isinstance(output, dict) else []
+
+    url_details = []
+    for i, u in enumerate(urls):
+        url_details.append(
+            f"{i + 1}. [priority {u.get('priority', '?')}] {u.get('title', '(no title)')}\n"
+            f"   URL: {u.get('url', '?')}\n"
+            f"   Reason: {u.get('relevance_reason', '?')}"
+        )
+
+    urls_text = "\n".join(url_details) if url_details else "(no URLs selected)"
+    gap_topic = inputs.get("gap_topic", "(none)")
+    gap_reason = inputs.get("gap_reason", "(none)")
+    search_results = inputs.get("search_results_text", "")
+    search_sample = search_results[:1500] + "..." if len(search_results) > 1500 else search_results
+
+    return (
+        f"Gap: {gap_topic}\n"
+        f"Reason: {gap_reason}\n\n"
+        f"Selected {len(urls)} URLs:\n{urls_text}\n\n"
+        f"Search results available:\n{search_sample}"
+    )
+
+
+URL_RANKING_STEP_CONFIG = StepConfig(
+    name="url_ranking",
+    cheap_check=cheap_check_url_ranking,
+    manager_prompt=URL_RANKING_MANAGER_PROMPT,
+    manager_context_builder=_url_ranking_context_builder,
+    rubric=[
+        RubricDimension("relevance", 0.35, "Do selected URLs directly address the gap topic?"),
+        RubricDimension("source_quality", 0.30, "Are sources authoritative (reports, docs, blogs) not low-quality?"),
+        RubricDimension("reasoning", 0.20, "Are relevance_reason fields specific, not generic ('useful article')?"),
+        RubricDimension("coverage", 0.15, "Do selected URLs collectively cover different angles of the gap?"),
+    ],
+    score_threshold=0.65,
+    max_retries=1,
+    use_manager=True,
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Persona extraction
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cheap_check_personas(output: Any) -> CheapCheckResult:
+    """Structural validation for persona extraction output."""
+    if not isinstance(output, list):
+        return CheapCheckResult(False, "Output must be a JSON array of personas.")
+
+    if len(output) == 0:
+        # Empty is valid if KB has no audience signals
+        return CheapCheckResult(True)
+
+    for i, p in enumerate(output):
+        if not isinstance(p, dict):
+            return CheapCheckResult(False, f"Persona {i} is not an object.")
+
+        # Required fields
+        name = p.get("name", "")
+        if not name or not isinstance(name, str):
+            return CheapCheckResult(False, f"Persona {i} is missing a 'name' field.")
+
+        desc = p.get("description", "")
+        if not desc or len(desc) < 20:
+            return CheapCheckResult(False, f"Persona {i} ('{name}') description is too short ({len(desc)} chars). Need ≥20.")
+
+        # Motivations and pain points
+        motivations = p.get("motivations", [])
+        if not isinstance(motivations, list) or len(motivations) == 0:
+            return CheapCheckResult(False, f"Persona '{name}' has no motivations.")
+        pain_points = p.get("pain_points", [])
+        if not isinstance(pain_points, list) or len(pain_points) == 0:
+            return CheapCheckResult(False, f"Persona '{name}' has no pain_points.")
+
+        # Demographics — at least 1 non-null field
+        demo = p.get("demographics", {})
+        if isinstance(demo, dict):
+            has_demo = any(demo.get(k) for k in ("age_range", "income_level", "location", "occupation", "education"))
+            if not has_demo:
+                return CheapCheckResult(False, f"Persona '{name}' has no demographic data. Need at least 1 field.")
+
+        # Confidence range
+        conf = p.get("confidence", -1)
+        try:
+            conf_val = float(conf)
+            if not (0.0 <= conf_val <= 1.0):
+                return CheapCheckResult(False, f"Persona '{name}' confidence {conf_val} is outside 0.0-1.0.")
+        except (ValueError, TypeError):
+            return CheapCheckResult(False, f"Persona '{name}' confidence is not a number.")
+
+        # Evidence sources
+        evidence = p.get("evidence_sources", [])
+        if not isinstance(evidence, list) or len(evidence) == 0:
+            return CheapCheckResult(False, f"Persona '{name}' has no evidence_sources. Must reference document/node IDs.")
+
+    # Check for duplicate names
+    names = [p.get("name", "").lower().strip() for p in output]
+    if len(names) != len(set(names)):
+        return CheapCheckResult(False, "Duplicate persona names found. Each persona must have a unique name.")
+
+    # Check distinctness (string similarity)
+    from difflib import SequenceMatcher
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            sim = SequenceMatcher(None, names[i], names[j]).ratio()
+            if sim > 0.7:
+                return CheapCheckResult(
+                    False,
+                    f"Personas '{output[i].get('name')}' and '{output[j].get('name')}' "
+                    f"are too similar (name similarity {sim:.0%}). Make them more distinct.",
+                )
+
+    return CheapCheckResult(True)
+
+
+def _persona_context_builder(output: Any, inputs: dict) -> str:
+    """Build the human message for the persona manager evaluation."""
+    personas = output if isinstance(output, list) else []
+
+    persona_details = []
+    for i, p in enumerate(personas):
+        evidence = p.get("evidence_sources", [])
+        persona_details.append(
+            f"{i + 1}. **{p.get('name', '?')}** (confidence: {p.get('confidence', '?')})\n"
+            f"   {p.get('description', '?')}\n"
+            f"   Demographics: {p.get('demographics', {})}\n"
+            f"   Motivations: {', '.join(p.get('motivations', [])[:3])}\n"
+            f"   Pain points: {', '.join(p.get('pain_points', [])[:3])}\n"
+            f"   Evidence sources: {len(evidence)} document(s)"
+        )
+
+    personas_text = "\n".join(persona_details)
+    request = inputs.get("request", "(none)")
+
+    return (
+        f"User request: {request}\n\n"
+        f"Generated {len(personas)} personas:\n{personas_text}"
+    )
+
+
+PERSONA_STEP_CONFIG = StepConfig(
+    name="persona_extraction",
+    cheap_check=cheap_check_personas,
+    manager_prompt=PERSONA_MANAGER_PROMPT,
+    manager_context_builder=_persona_context_builder,
+    rubric=[
+        RubricDimension("distinctness", 0.25, "Are personas meaningfully different, not variations of the same archetype?"),
+        RubricDimension("grounding", 0.25, "Are personas backed by specific KB content, not generic marketing archetypes?"),
+        RubricDimension("evidence_quality", 0.20, "Do evidence_sources reference real documents, and do they support the persona?"),
+        RubricDimension("substance", 0.15, "Do motivations and pain points have real detail, not filler?"),
+        RubricDimension("profile_alignment", 0.15, "Do personas reflect the client's industry and demographic context?"),
+    ],
+    score_threshold=0.7,
+    max_retries=1,
+    use_manager=True,
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Business insights synthesis
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cheap_check_insights(output: Any) -> CheapCheckResult:
+    """Structural validation for business insights report."""
+    if not isinstance(output, dict):
+        return CheapCheckResult(False, "Output must be a JSON object.")
+
+    summary = output.get("executive_summary", "")
+    if not summary or len(summary) < 100:
+        return CheapCheckResult(False, f"executive_summary is too short ({len(summary)} chars). Need ≥100.")
+
+    lower = summary.strip().lower()
+    if lower.startswith("as an ai") or lower.startswith("i am") or lower.startswith("i'm"):
+        return CheapCheckResult(False, "executive_summary starts with prompt leakage.")
+
+    findings = output.get("key_findings", [])
+    if not isinstance(findings, list) or len(findings) < 1:
+        return CheapCheckResult(False, f"Need at least 1 key_finding.")
+
+    for i, f in enumerate(findings):
+        if not isinstance(f, dict):
+            return CheapCheckResult(False, f"Finding {i} is not an object.")
+        if not f.get("finding"):
+            return CheapCheckResult(False, f"Finding {i} is missing 'finding' text.")
+        if not f.get("evidence_sources") or not isinstance(f["evidence_sources"], list):
+            return CheapCheckResult(False, f"Finding {i} has no evidence_sources.")
+
+    recs = output.get("recommendations", [])
+    if not isinstance(recs, list) or len(recs) < 1:
+        return CheapCheckResult(False, f"Need at least 1 recommendation.")
+
+    for i, r in enumerate(recs):
+        if not isinstance(r, dict) or not r.get("recommendation"):
+            return CheapCheckResult(False, f"Recommendation {i} is missing or invalid.")
+
+    if not isinstance(output.get("data_sources_used"), dict):
+        return CheapCheckResult(False, "Missing 'data_sources_used' dict.")
+    if not isinstance(output.get("data_gaps"), list):
+        return CheapCheckResult(False, "Missing 'data_gaps' list.")
+
+    return CheapCheckResult(True)
+
+
+def _insights_context_builder(output: Any, inputs: dict) -> str:
+    """Build human message for insights manager evaluation."""
+    if not isinstance(output, dict):
+        return "Output was not valid JSON."
+
+    summary = output.get("executive_summary", "")[:500]
+    findings = output.get("key_findings", [])
+    recs = output.get("recommendations", [])
+    sources_used = output.get("data_sources_used", {})
+    gaps = output.get("data_gaps", [])
+    personas = output.get("personas_referenced", [])
+
+    findings_text = "\n".join(
+        f"- [{f.get('confidence', '?')}] {f.get('finding', '?')} (sources: {len(f.get('evidence_sources', []))})"
+        for f in findings[:5]
+    )
+    recs_text = "\n".join(
+        f"- [{r.get('priority', '?')}] {r.get('recommendation', '?')}"
+        for r in recs[:5]
+    )
+    sources_text = ", ".join(f"{k}={v}" for k, v in sources_used.items())
+    gaps_text = ", ".join(g.get("source", "?") for g in gaps) if gaps else "(none)"
+
+    return (
+        f"Executive summary:\n{summary}...\n\n"
+        f"Key findings ({len(findings)}):\n{findings_text}\n\n"
+        f"Recommendations ({len(recs)}):\n{recs_text}\n\n"
+        f"Data sources: {sources_text}\n"
+        f"Gaps: {gaps_text}\n"
+        f"Personas: {', '.join(personas) if personas else '(none)'}"
+    )
+
+
+INSIGHTS_STEP_CONFIG = StepConfig(
+    name="business_insights",
+    cheap_check=cheap_check_insights,
+    manager_prompt=INSIGHTS_MANAGER_PROMPT,
+    manager_context_builder=_insights_context_builder,
+    rubric=[
+        RubricDimension("evidence_grounding", 0.25, "Are findings backed by specific data from analyses, not generic claims?"),
+        RubricDimension("cross_source_synthesis", 0.25, "Does the report connect insights across sentiment, transcripts, surveys, and KB?"),
+        RubricDimension("actionability", 0.20, "Are recommendations specific and implementable?"),
+        RubricDimension("completeness", 0.15, "Does the report cover all available data sources, not just one?"),
+        RubricDimension("persona_integration", 0.15, "Are findings contextualized by audience personas when available?"),
     ],
     score_threshold=0.7,
     max_retries=1,

@@ -101,21 +101,15 @@ def flush_redis():
 
 @router.get("/context/{tenant_id}/{client_id}")
 def get_context_summary(tenant_id: str, client_id: str):
-    """Read the stored context summary directly from Supabase.
+    """Read the stored context summary via core API.
 
     This is the fast read path for downstream agents — no LLM call,
-    just a Supabase query. Use POST /context/summary/generate to
-    create or regenerate the summary via the context agent.
+    just an HTTP call to the memory layer.
     """
-    from uuid import UUID
+    from app import core_client
 
     try:
-        from app.supabase_client import get_supabase
-        from app.services.context_summary_service import ContextSummaryService
-
-        sb = get_supabase()
-        svc = ContextSummaryService(sb)
-        row = svc.get_summary(tenant_id=UUID(tenant_id), client_id=UUID(client_id))
+        row = core_client.get_context_summary(tenant_id=tenant_id, client_id=client_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read context summary: {e}")
 

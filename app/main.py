@@ -34,6 +34,7 @@ from app.routers.admin_router import router as admin_ops_router
 from app.harness_pkg.router import router as harness_router
 from app.routers.optimizer_router import router as optimizer_router
 from app.routers.insights_router import router as insights_router
+from app.routers.form_router import router as form_router
 from app.routers.kg_router import router as kg_router
 
 app = FastAPI(
@@ -66,6 +67,7 @@ app.include_router(admin_ops_router)
 app.include_router(harness_router)
 app.include_router(optimizer_router)
 app.include_router(insights_router)
+app.include_router(form_router)
 app.include_router(kg_router)
 
 

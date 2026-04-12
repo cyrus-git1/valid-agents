@@ -240,6 +240,7 @@ def _run_batch_file_ingest(
     client_id: uuid.UUID,
     prune_after_ingest: bool,
 ) -> None:
+    total_chunks = 0
     for i, item in enumerate(files_data):
         _batches[batch_id]["items"][i]["status"] = "running"
         try:
@@ -251,7 +252,9 @@ def _run_batch_file_ingest(
                 file_name=item["file_name"],
                 title=item.get("title"),
                 prune_after_ingest=prune_after_ingest and (i == len(files_data) - 1),
+                skip_context_generation=True,  # generate once at end
             ))
+            total_chunks += result.chunks_upserted
             _batches[batch_id]["items"][i].update({
                 "status": "complete",
                 "document_id": str(result.document_id),
@@ -263,6 +266,18 @@ def _run_batch_file_ingest(
                 "status": "failed",
                 "detail": str(e),
             })
+
+    # Generate context summary once after all items ingested
+    if total_chunks > 0:
+        try:
+            from app.agents.context_agent import run_context_agent
+            run_context_agent(
+                tenant_id=str(tenant_id), client_id=str(client_id),
+                force_regenerate=True,
+            )
+        except Exception as e:
+            logger.warning("Batch context generation failed: %s", e)
+
     _finalise_batch(batch_id)
 
 
@@ -273,6 +288,7 @@ def _run_batch_web_ingest(
     client_id: uuid.UUID,
     prune_after_ingest: bool,
 ) -> None:
+    total_chunks = 0
     for i, item in enumerate(items):
         _batches[batch_id]["items"][i]["status"] = "running"
         try:
@@ -287,7 +303,9 @@ def _run_batch_web_ingest(
                 title=item.get("title"),
                 metadata=item.get("metadata", {}),
                 prune_after_ingest=prune_after_ingest and (i == len(items) - 1),
+                skip_context_generation=True,
             ))
+            total_chunks += result.chunks_upserted
             _batches[batch_id]["items"][i].update({
                 "status": "complete",
                 "document_id": str(result.document_id),
@@ -299,6 +317,18 @@ def _run_batch_web_ingest(
                 "status": "failed",
                 "detail": str(e),
             })
+
+    # Generate context summary once after all items ingested
+    if total_chunks > 0:
+        try:
+            from app.agents.context_agent import run_context_agent
+            run_context_agent(
+                tenant_id=str(tenant_id), client_id=str(client_id),
+                force_regenerate=True,
+            )
+        except Exception as e:
+            logger.warning("Batch context generation failed: %s", e)
+
     _finalise_batch(batch_id)
 
 

@@ -47,6 +47,7 @@ class IngestInput(BaseModel):
     embed_model: str = "text-embedding-3-small"
     embed_batch_size: int = 64
     prune_after_ingest: bool = False
+    skip_context_generation: bool = Field(default=False, description="Skip auto context summary — used by batch ingest to generate once at end")
 
     model_config = {"arbitrary_types_allowed": True}
 

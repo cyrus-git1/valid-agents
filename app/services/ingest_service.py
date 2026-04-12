@@ -337,8 +337,8 @@ class IngestService:
         else:
             raise ValueError("IngestInput requires either (file_bytes + file_name) or web_url.")
 
-        # Auto-generate context summary via context agent
-        if result.chunks_upserted > 0:
+        # Auto-generate context summary via context agent (skip in batch mode)
+        if result.chunks_upserted > 0 and not inp.skip_context_generation:
             try:
                 from app.agents.context_agent import run_context_agent
                 ctx_result = run_context_agent(

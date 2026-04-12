@@ -79,6 +79,22 @@ INSIGHTS_MANAGER_PROMPT = (
     "- executive_summary synthesizes, not just lists findings"
 )
 
+TARGETING_MANAGER_PROMPT = (
+    "You evaluate demographic targeting recommendations for quality. You will "
+    "be given the targeting output, the survey questions it targets, and the "
+    "company's KB context.\n\n"
+    "A good targeting recommendation:\n"
+    "- Demographics match the survey's topic — a survey about enterprise SaaS "
+    "shouldn't target teenagers\n"
+    "- Uses specific signals from the KB context (named segments, pricing tiers, "
+    "geographic mentions) not generic assumptions\n"
+    "- Each demographic field is specific enough for panel recruitment, not 'any' "
+    "or 'all' for everything\n"
+    "- Sample size is realistic for the survey complexity (not 10, not 10000)\n"
+    "- Exclusion criteria are relevant and specific\n"
+    "- Reasoning references actual context/survey content, not boilerplate"
+)
+
 CONTEXT_MANAGER_PROMPT = (
     "You evaluate generated context summaries for quality. You will be given "
     "the generated summary, its topic tags, and a sample of the knowledge base "

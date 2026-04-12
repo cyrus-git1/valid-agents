@@ -197,43 +197,72 @@ def generate_targeting(req: FormTargetRequest) -> FormTargetResponse:
     if req.focus:
         focus_text = f"Targeting Focus: {req.focus}\n\n"
 
-    if not context_text and not survey_text:
+    if not context_text and not survey_text and not kb_text:
         raise HTTPException(
             status_code=400,
-            detail="Need either a context summary or survey questions to generate targeting. Ingest content or provide survey_questions.",
+            detail="Need either a context summary, KB content, or survey questions to generate targeting.",
         )
 
-    # Generate targeting
+    # Generate targeting via harness
+    import re
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
+    from app.harness_pkg import run_with_harness, StepOutput
+    from app.harness_pkg.configs import TARGETING_STEP_CONFIG
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", TARGETING_SYSTEM_PROMPT),
-        ("human", "{context}{kb_excerpts}{profile}{survey}{focus}Generate the demographic targeting recommendation."),
+        ("human", "{context}{kb_excerpts}{profile}{survey}{focus}{feedback_section}"
+                  "Generate the demographic targeting recommendation."),
     ])
 
     llm = get_llm("context_analysis")
     chain = prompt | llm | StrOutputParser()
 
-    try:
-        raw = chain.invoke({
-            "context": context_text,
-            "kb_excerpts": kb_text,
-            "profile": profile_text,
-            "survey": survey_text,
-            "focus": focus_text,
-        })
+    invoke_vars = {
+        "context": context_text,
+        "kb_excerpts": kb_text,
+        "profile": profile_text,
+        "survey": survey_text,
+        "focus": focus_text,
+    }
 
-        # Parse JSON
-        import re
+    def step_fn(inputs: dict, feedback_section: str):
+        raw = chain.invoke({**invoke_vars, "feedback_section": feedback_section})
+
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             match = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)
             if match:
                 cleaned = match.group(1).strip()
-        parsed = json.loads(cleaned)
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            parsed = {}
 
-        # Build response
+        return StepOutput(
+            result=parsed,
+            prompt_sent=f"[targeting] context={len(context_text)}c kb={len(kb_text)}c survey={len(survey_text)}c",
+            raw_llm_output=raw if isinstance(raw, str) else str(raw),
+        )
+
+    harness_result = run_with_harness(
+        step_fn,
+        {
+            "tenant_id": str(req.tenant_id),
+            "client_id": str(req.client_id),
+            "context_summary": context_text[:300],
+            "survey_summary": survey_text[:300],
+        },
+        TARGETING_STEP_CONFIG,
+    )
+
+    parsed = harness_result.output if isinstance(harness_result.output, dict) else {}
+
+    if not parsed.get("primary_target"):
+        raise HTTPException(status_code=500, detail="Failed to generate targeting recommendation.")
+
+    try:
         primary = DemographicTarget(**(parsed.get("primary_target", {})))
         secondary = None
         if parsed.get("secondary_target"):
@@ -252,9 +281,6 @@ def generate_targeting(req: FormTargetRequest) -> FormTargetResponse:
             context_used=bool(context_text),
             survey_used=bool(survey_text),
         )
-
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse targeting response: {e}")
     except Exception as e:
-        logger.exception("Targeting generation failed")
+        logger.exception("Targeting response build failed")
         raise HTTPException(status_code=500, detail=f"Targeting generation failed: {e}")

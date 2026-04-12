@@ -14,6 +14,7 @@ from app.harness_pkg.prompts import (
     INSIGHTS_MANAGER_PROMPT,
     PERSONA_MANAGER_PROMPT,
     SURVEY_MANAGER_PROMPT,
+    TARGETING_MANAGER_PROMPT,
     URL_RANKING_MANAGER_PROMPT,
 )
 from app.prompts.survey_prompts import ALL_QUESTION_TYPES
@@ -853,4 +854,106 @@ INSIGHTS_STEP_CONFIG = StepConfig(
     score_threshold=0.7,
     max_retries=0,        # no retries — too expensive for ReAct agent
     use_manager=False,    # disabled until all data sources are working
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Demographic targeting
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def cheap_check_targeting(output: Any) -> CheapCheckResult:
+    """Structural validation for targeting recommendations."""
+    if not isinstance(output, dict):
+        return CheapCheckResult(False, "Output must be a JSON object.")
+
+    primary = output.get("primary_target")
+    if not isinstance(primary, dict):
+        return CheapCheckResult(False, "Missing 'primary_target' object.")
+
+    # At least 3 demographic fields should be specific (not null/empty/'any'/'all')
+    _GENERIC = {"any", "all", "n/a", "none", ""}
+    specific_count = 0
+    for field in ("age_range", "gender", "income_level", "location", "occupation", "education", "industry"):
+        val = primary.get(field)
+        if val and isinstance(val, str) and val.strip().lower() not in _GENERIC:
+            specific_count += 1
+
+    if specific_count < 3:
+        return CheapCheckResult(
+            False,
+            f"Primary target has only {specific_count} specific demographic fields. "
+            "Need at least 3 non-generic fields (not 'any', 'all', or empty).",
+        )
+
+    # Sample size must be reasonable
+    sample = output.get("sample_size_recommendation")
+    if sample is not None:
+        try:
+            sample_int = int(sample)
+            if sample_int < 20:
+                return CheapCheckResult(False, f"Sample size {sample_int} is too small. Minimum 20.")
+            if sample_int > 5000:
+                return CheapCheckResult(False, f"Sample size {sample_int} is unrealistically large. Max 5000.")
+        except (ValueError, TypeError):
+            return CheapCheckResult(False, f"Sample size '{sample}' is not a number.")
+
+    # Reasoning must be substantive
+    reasoning = output.get("reasoning", "")
+    if not reasoning or len(reasoning) < 30:
+        return CheapCheckResult(False, f"Reasoning is too short ({len(reasoning)} chars). Must explain why these demographics were chosen.")
+
+    # Exclusion criteria should be a list
+    exclusions = output.get("exclusion_criteria")
+    if exclusions is not None and not isinstance(exclusions, list):
+        return CheapCheckResult(False, "'exclusion_criteria' must be a list.")
+
+    return CheapCheckResult(True)
+
+
+def _targeting_context_builder(output: Any, inputs: dict) -> str:
+    """Build human message for targeting manager evaluation."""
+    if not isinstance(output, dict):
+        return "Output was not valid JSON."
+
+    primary = output.get("primary_target", {})
+    secondary = output.get("secondary_target")
+    sample = output.get("sample_size_recommendation", "?")
+    reasoning = output.get("reasoning", "")[:300]
+    exclusions = output.get("exclusion_criteria", [])
+
+    primary_text = "\n".join(f"  {k}: {v}" for k, v in primary.items() if v)
+    secondary_text = ""
+    if secondary:
+        secondary_text = "\nSecondary target:\n" + "\n".join(f"  {k}: {v}" for k, v in secondary.items() if v)
+
+    survey_text = inputs.get("survey_summary", "(no survey)")
+    context_text = inputs.get("context_summary", "(no context)")
+
+    return (
+        f"Company context: {context_text[:300]}\n\n"
+        f"Survey: {survey_text[:300]}\n\n"
+        f"Primary target:\n{primary_text}\n"
+        f"{secondary_text}\n"
+        f"Sample size: {sample}\n"
+        f"Reasoning: {reasoning}\n"
+        f"Exclusions: {', '.join(exclusions[:5]) if exclusions else '(none)'}"
+    )
+
+
+TARGETING_STEP_CONFIG = StepConfig(
+    name="demographic_targeting",
+    cheap_check=cheap_check_targeting,
+    manager_prompt=TARGETING_MANAGER_PROMPT,
+    manager_context_builder=_targeting_context_builder,
+    rubric=[
+        RubricDimension("survey_relevance", 0.30, "Do demographics match the survey's topic and questions? A survey about enterprise SaaS shouldn't target teenagers."),
+        RubricDimension("context_grounding", 0.25, "Are demographics informed by specific KB content (named segments, pricing tiers, locations) not generic assumptions?"),
+        RubricDimension("specificity", 0.20, "Are demographic fields specific enough for panel recruitment, not 'any' for everything?"),
+        RubricDimension("reasoning_quality", 0.15, "Does the reasoning reference actual context and survey content, not boilerplate?"),
+        RubricDimension("sample_appropriateness", 0.10, "Is the sample size realistic for the survey complexity and target population?"),
+    ],
+    score_threshold=0.7,
+    max_retries=1,
+    use_manager=True,
 )

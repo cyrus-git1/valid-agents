@@ -184,14 +184,8 @@ def ingest_web_url(
     Returns a dict with 'job_id' on success or 'error' on failure.
     """
     try:
-        resp = core_client.ingest_web(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            url=url,
-            title=title,
-            metadata=metadata or {},
-        )
-        return {"job_id": resp.get("job_id", "unknown"), "url": url}
+        # Send as a recommendation — the core API or user decides whether to ingest
+        return {"status": "recommended", "url": url, "title": title, "message": "URL recommended for ingestion. Use /ingest/web to process."}
     except Exception as e:
         logger.warning("ingest_web_url failed for %s: %s", url, e)
         return {"error": str(e), "url": url}

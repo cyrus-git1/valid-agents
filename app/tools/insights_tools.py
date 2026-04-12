@@ -110,11 +110,17 @@ def create_insights_tools(
         Only call this if check_available_data showed transcripts > 0.
         """
         try:
+            # Fetch transcript chunks via core API
+            chunks = core_client.get_transcript_chunks(
+                tenant_id=tenant_id, client_id=client_id, limit=50,
+            )
+            if not chunks:
+                return {"error": "No transcript chunks found", "overall_sentiment": {}, "themes": [], "summary": ""}
+
             from app.analysis.sentiment import SentimentAnalysisService
             svc = SentimentAnalysisService(tenant_id=tenant_id, client_id=client_id)
-            return svc.generate_analysis(
-                tenant_id=tenant_id,
-                client_id=client_id,
+            return svc._run_analysis(
+                chunks=chunks,
                 focus_query=focus_query,
                 client_profile=client_profile,
             )
@@ -130,14 +136,15 @@ def create_insights_tools(
         Only call this if check_available_data showed transcripts > 0.
         """
         try:
+            chunks = core_client.get_transcript_chunks(
+                tenant_id=tenant_id, client_id=client_id, limit=60,
+            )
+            if not chunks:
+                return {"error": "No transcript chunks found", "summary": "", "actionable_insights": []}
+
             from app.analysis.transcript_insights import TranscriptInsightsService
             svc = TranscriptInsightsService(tenant_id=tenant_id, client_id=client_id)
-            # Use a generic survey_id since we're analyzing all transcripts
-            from uuid import UUID
-            return svc.generate(
-                tenant_id=UUID(tenant_id),
-                survey_id=UUID(client_id),  # using client_id as survey scope
-            )
+            return svc._run_insights(chunks=chunks)
         except Exception as e:
             logger.warning("extract_transcript_insights failed: %s", e)
             return {"error": str(e), "summary": "", "actionable_insights": []}
@@ -190,14 +197,34 @@ def create_insights_tools(
         into a strategic overview with action points.
         """
         try:
-            from app.analysis.strategic import StrategicAnalysisService
-            from uuid import UUID
-            svc = StrategicAnalysisService(tenant_id=tenant_id, client_id=client_id)
-            return svc.generate_analysis(
-                tenant_id=UUID(tenant_id),
-                client_id=UUID(client_id),
-                client_profile=client_profile,
+            # Strategic analysis needs refactoring for stateless mode.
+            # For now, build a basic strategic view from context + KB search.
+            context = core_client.get_context_summary(
+                tenant_id=tenant_id, client_id=client_id,
             )
+            docs = core_client.search_graph(
+                tenant_id=tenant_id, client_id=client_id,
+                query="strategy goals challenges opportunities trends",
+                top_k=15, hop_limit=1,
+            )
+
+            if not context and not docs:
+                return {"error": "No data available for strategic analysis", "executive_summary": "", "action_points": []}
+
+            # Use the context summary + KB content as a lightweight strategic view
+            summary = context.get("summary", "") if context else ""
+            topics = context.get("topics", []) if context else []
+            doc_excerpts = [d.page_content[:200] for d in docs[:5]] if docs else []
+
+            return {
+                "executive_summary": summary,
+                "convergent_themes": topics,
+                "action_points": [],
+                "sources_used": {
+                    "kg_chunks_retrieved": len(docs) if docs else 0,
+                    "context_summary_available": context is not None,
+                },
+            }
         except Exception as e:
             logger.warning("run_strategic_analysis failed: %s", e)
             return {"error": str(e), "executive_summary": "", "action_points": []}

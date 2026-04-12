@@ -44,6 +44,7 @@ from app.harness_pkg import run_with_harness, StepOutput
 from app.harness_pkg.configs import SURVEY_STEP_CONFIG, get_active_survey_config
 from app.tools.survey_tools import (
     search_knowledge_base,
+    get_context_summary,
     get_prior_survey_outputs,
     analyze_survey_context,
 )
@@ -131,7 +132,19 @@ def build_prompt(state: SurveyState) -> SurveyState:
             if doc.page_content.strip()
         )
 
-    context_section = f"\n\n{context}" if context else ""
+    # Fetch context summary and prepend to context
+    summary = get_context_summary.invoke({
+        "tenant_id": state["tenant_id"],
+        "client_id": state["client_id"],
+    })
+    summary_section = ""
+    if summary:
+        summary_section = (
+            f"Business Context Summary:\n{summary.get('summary', '')}\n"
+            f"Key Topics: {', '.join(summary.get('topics', []))}\n\n"
+        )
+
+    context_section = f"\n\n{summary_section}{context}" if (context or summary_section) else ""
 
     # Build profile section
     client_profile = state.get("client_profile", {})

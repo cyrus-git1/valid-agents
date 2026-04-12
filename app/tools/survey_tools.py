@@ -21,6 +21,27 @@ logger = logging.getLogger(__name__)
 
 
 @tool
+def get_context_summary(
+    tenant_id: str,
+    client_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the existing context summary for this tenant+client.
+
+    Returns {summary, topics} with high-level business context.
+    Use this alongside search_knowledge_base to ground survey questions
+    in the company's actual industry, products, and audience.
+    """
+    try:
+        return core_client.get_context_summary(
+            tenant_id=tenant_id,
+            client_id=client_id,
+        )
+    except Exception as e:
+        logger.warning("get_context_summary failed: %s", e)
+        return None
+
+
+@tool
 def search_knowledge_base(
     tenant_id: str,
     client_id: str,
@@ -40,6 +61,7 @@ def search_knowledge_base(
             query=query,
             top_k=top_k,
             hop_limit=hop_limit,
+            node_types=["Chunk"],  # get actual content, not entity labels
         )
     except Exception as e:
         logger.warning("search_knowledge_base failed: %s", e)

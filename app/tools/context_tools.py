@@ -35,6 +35,7 @@ def search_knowledge_base(
             query=query,
             top_k=top_k,
             hop_limit=hop_limit,
+            node_types=["Chunk"],
         )
     except Exception as e:
         logger.warning("context search_knowledge_base failed: %s", e)

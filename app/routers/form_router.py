@@ -150,6 +150,38 @@ def generate_targeting(req: FormTargetRequest) -> FormTargetResponse:
                 lines.append(f"   Options: {', '.join(q['options'][:6])}")
         survey_text = f"Survey: {survey_title or 'Untitled'}\n" + "\n".join(lines) + "\n\n"
 
+    # Search KB for demographic signals
+    kb_text = ""
+    _DEMO_QUERIES = [
+        "customer demographics age gender location target audience",
+        "user segments market profile buyer persona consumer",
+        "pricing tiers plans enterprise consumer business",
+    ]
+    all_excerpts = []
+    seen_ids = set()
+    for q in _DEMO_QUERIES:
+        try:
+            docs = core_client.search_graph(
+                tenant_id=str(req.tenant_id),
+                client_id=str(req.client_id),
+                query=q,
+                top_k=5,
+                hop_limit=1,
+                node_types=["Chunk"],
+            )
+            for d in docs:
+                nid = d.metadata.get("node_id")
+                if nid and nid not in seen_ids:
+                    seen_ids.add(nid)
+                    all_excerpts.append(d.page_content)
+        except Exception:
+            pass
+
+    if all_excerpts:
+        kb_text = "Knowledge Base Excerpts (demographic signals):\n" + "\n\n---\n\n".join(
+            f"[Excerpt {i+1}]\n{e}" for i, e in enumerate(all_excerpts[:10])
+        ) + "\n\n"
+
     # Build profile section
     profile_text = ""
     if req.client_profile:
@@ -177,7 +209,7 @@ def generate_targeting(req: FormTargetRequest) -> FormTargetResponse:
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", TARGETING_SYSTEM_PROMPT),
-        ("human", "{context}{profile}{survey}{focus}Generate the demographic targeting recommendation."),
+        ("human", "{context}{kb_excerpts}{profile}{survey}{focus}Generate the demographic targeting recommendation."),
     ])
 
     llm = get_llm("context_analysis")
@@ -186,6 +218,7 @@ def generate_targeting(req: FormTargetRequest) -> FormTargetResponse:
     try:
         raw = chain.invoke({
             "context": context_text,
+            "kb_excerpts": kb_text,
             "profile": profile_text,
             "survey": survey_text,
             "focus": focus_text,

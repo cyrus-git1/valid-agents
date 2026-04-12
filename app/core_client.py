@@ -40,9 +40,11 @@ def search_graph(
     hop_limit: int = 1,
     max_neighbours: int = 3,
     min_edge_weight: float = 0.75,
+    node_types: Optional[List[str]] = None,
+    rel_types: Optional[List[str]] = None,
 ) -> List[Document]:
     """KG graph-expanded search via Core API -> LangChain Documents."""
-    resp = _post("/search/graph", {
+    body: Dict[str, Any] = {
         "tenant_id": tenant_id,
         "client_id": client_id,
         "query": query,
@@ -50,7 +52,12 @@ def search_graph(
         "hop_limit": hop_limit,
         "max_neighbours": max_neighbours,
         "min_edge_weight": min_edge_weight,
-    })
+    }
+    if node_types:
+        body["node_types"] = node_types
+    if rel_types:
+        body["rel_types"] = rel_types
+    resp = _post("/search/graph", body)
     return _results_to_documents(resp.get("results", []))
 
 
@@ -60,14 +67,18 @@ def search_semantic(
     client_id: str,
     query: str,
     top_k: int = 5,
+    node_types: Optional[List[str]] = None,
 ) -> List[Document]:
     """KG vector-only search via Core API -> LangChain Documents."""
-    resp = _post("/search/semantic", {
+    body: Dict[str, Any] = {
         "tenant_id": tenant_id,
         "client_id": client_id,
         "query": query,
         "top_k": top_k,
-    })
+    }
+    if node_types:
+        body["node_types"] = node_types
+    resp = _post("/search/semantic", body)
     return _results_to_documents(resp.get("results", []))
 
 

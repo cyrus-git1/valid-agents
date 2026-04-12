@@ -1,17 +1,19 @@
 """
 Tools for the business insights orchestrator.
 
-Closure-based factory — tenant/client context baked into each tool.
-Wraps analysis services, persona agent, enrichment agent, and data access.
+Fully stateless — all data access via core_client HTTP calls.
+Analysis is done via direct LLM prompts, not service classes.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
 
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.tools import tool
 
 from app import core_client
+from app.llm_config import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,7 @@ def create_insights_tools(
     def check_context() -> Optional[Dict[str, Any]]:
         """Check if a context summary exists for this tenant.
 
-        Returns {summary, topics} or None. Always call this first to
-        understand what the KB covers before running analyses.
+        Returns {summary, topics} or None. Always call this first.
         """
         try:
             return core_client.get_context_summary(
@@ -85,8 +86,7 @@ def create_insights_tools(
     def get_personas() -> List[Dict[str, Any]]:
         """Get audience personas for this tenant.
 
-        Runs the persona agent if no cached personas exist.
-        Returns list of persona dicts with evidence_sources.
+        Runs the persona agent. Returns list of persona dicts with evidence_sources.
         """
         try:
             from app.agents.persona_agent import run_persona_agent
@@ -100,53 +100,98 @@ def create_insights_tools(
             logger.warning("get_personas failed: %s", e)
             return []
 
-    # ── Analysis tools ──────────────────────────────────────────────────
+    # ── Analysis tools (all use search + direct LLM) ────────────────────
 
     @tool
     def analyze_sentiment(focus_query: Optional[str] = None) -> Dict[str, Any]:
-        """Run sentiment analysis on transcript data.
+        """Analyze sentiment from transcript and document content.
 
-        Returns overall sentiment scores, themes, notable quotes, and summary.
-        Only call this if check_available_data showed transcripts > 0.
+        Searches for sentiment-relevant content via KG, then runs
+        sentiment analysis via LLM. Only call if transcripts or documents exist.
         """
-        try:
-            # Fetch transcript chunks via core API
-            chunks = core_client.get_transcript_chunks(
-                tenant_id=tenant_id, client_id=client_id, limit=50,
-            )
-            if not chunks:
-                return {"error": "No transcript chunks found", "overall_sentiment": {}, "themes": [], "summary": ""}
+        queries = [
+            "customer feedback opinions satisfaction complaints",
+            "positive negative experience sentiment feelings",
+        ]
+        if focus_query:
+            queries.append(focus_query)
 
-            from app.analysis.sentiment import SentimentAnalysisService
-            svc = SentimentAnalysisService(tenant_id=tenant_id, client_id=client_id)
-            return svc._run_analysis(
-                chunks=chunks,
-                focus_query=focus_query,
-                client_profile=client_profile,
-            )
+        all_content = []
+        for q in queries:
+            try:
+                docs = core_client.search_graph(
+                    tenant_id=tenant_id, client_id=client_id,
+                    query=q, top_k=10, hop_limit=1,
+                    node_types=["VideoTranscript", "Chunk"],
+                )
+                for d in docs:
+                    all_content.append(d.page_content)
+            except Exception:
+                pass
+
+        if not all_content:
+            return {"error": "No content found for sentiment analysis", "overall_sentiment": {}, "themes": [], "summary": ""}
+
+        context = "\n\n---\n\n".join(f"[Excerpt {i+1}]\n{c}" for i, c in enumerate(all_content[:15]))
+
+        from app.prompts.sentiment_prompts import SENTIMENT_ANALYSIS_PROMPT
+        llm = get_llm("context_analysis")
+        chain = SENTIMENT_ANALYSIS_PROMPT | llm | StrOutputParser()
+
+        try:
+            import json
+            focus_instructions = ""
+            if focus_query:
+                focus_instructions = f"Focus your analysis on: {focus_query}\n"
+
+            raw = chain.invoke({
+                "focus_instructions": focus_instructions,
+                "profile_section": "",
+                "transcript_count": str(len(all_content)),
+                "chunk_count": str(len(all_content)),
+                "transcript_context": context,
+                "context_summary": "",
+            })
+            return json.loads(raw)
         except Exception as e:
-            logger.warning("analyze_sentiment failed: %s", e)
+            logger.warning("analyze_sentiment LLM failed: %s", e)
             return {"error": str(e), "overall_sentiment": {}, "themes": [], "summary": ""}
 
     @tool
     def extract_transcript_insights() -> Dict[str, Any]:
-        """Extract actionable insights from transcript data.
+        """Extract actionable insights from transcript and document content.
 
-        Returns summary + list of actionable insights with categories and source quotes.
-        Only call this if check_available_data showed transcripts > 0.
+        Searches for insight-relevant content via KG, then extracts via LLM.
         """
         try:
-            chunks = core_client.get_transcript_chunks(
-                tenant_id=tenant_id, client_id=client_id, limit=60,
+            docs = core_client.search_graph(
+                tenant_id=tenant_id, client_id=client_id,
+                query="actionable insights pain points feature requests improvements",
+                top_k=15, hop_limit=1,
+                node_types=["VideoTranscript", "Chunk"],
             )
-            if not chunks:
-                return {"error": "No transcript chunks found", "summary": "", "actionable_insights": []}
+        except Exception:
+            docs = []
 
-            from app.analysis.transcript_insights import TranscriptInsightsService
-            svc = TranscriptInsightsService(tenant_id=tenant_id, client_id=client_id)
-            return svc._run_insights(chunks=chunks)
+        if not docs:
+            return {"error": "No content found", "summary": "", "actionable_insights": []}
+
+        context = "\n\n---\n\n".join(f"[Excerpt {i+1}]\n{d.page_content}" for i, d in enumerate(docs[:15]))
+
+        from app.prompts.transcript_insights_prompts import TRANSCRIPT_INSIGHTS_PROMPT
+        llm = get_llm("context_analysis")
+        chain = TRANSCRIPT_INSIGHTS_PROMPT | llm | StrOutputParser()
+
+        try:
+            import json
+            raw = chain.invoke({
+                "transcript_count": str(len(docs)),
+                "chunk_count": str(len(docs)),
+                "transcript_context": context,
+            })
+            return json.loads(raw)
         except Exception as e:
-            logger.warning("extract_transcript_insights failed: %s", e)
+            logger.warning("extract_transcript_insights LLM failed: %s", e)
             return {"error": str(e), "summary": "", "actionable_insights": []}
 
     @tool
@@ -154,9 +199,10 @@ def create_insights_tools(
         """Compute confidence intervals on survey response data.
 
         Returns per-question statistical confidence intervals.
-        Only call this if check_available_data showed survey_count > 0.
+        Only call if check_available_data showed survey_count > 0.
         """
         try:
+            import json
             surveys = core_client.get_survey_outputs(
                 tenant_id=tenant_id, client_id=client_id, limit=10,
             )
@@ -166,12 +212,10 @@ def create_insights_tools(
             from app.analysis.confidence_interval import ConfidenceIntervalService
             svc = ConfidenceIntervalService()
 
-            # Collect questions with responses across surveys
             questions_with_responses = []
             for survey in surveys:
                 qs = survey.get("questions", [])
                 if isinstance(qs, str):
-                    import json
                     try:
                         qs = json.loads(qs)
                     except Exception:
@@ -191,43 +235,65 @@ def create_insights_tools(
 
     @tool
     def run_strategic_analysis() -> Dict[str, Any]:
-        """Run convergent strategic analysis across all data sources.
+        """Run strategic analysis across all available data sources.
 
-        Combines KB content, transcripts, context summary, and optional web data
-        into a strategic overview with action points.
+        Searches KB for strategic themes, combines with context summary.
         """
+        context = core_client.get_context_summary(
+            tenant_id=tenant_id, client_id=client_id,
+        )
+
+        strategic_queries = [
+            "strategy goals challenges opportunities market position",
+            "competitive advantage strengths weaknesses threats",
+            "products services offerings value proposition",
+        ]
+
+        all_docs = []
+        for q in strategic_queries:
+            try:
+                docs = core_client.search_graph(
+                    tenant_id=tenant_id, client_id=client_id,
+                    query=q, top_k=10, hop_limit=1,
+                )
+                all_docs.extend(docs)
+            except Exception:
+                pass
+
+        if not context and not all_docs:
+            return {"error": "No data available", "executive_summary": "", "action_points": []}
+
+        kb_context = "\n\n---\n\n".join(
+            f"[Source {i+1}]\n{d.page_content}" for i, d in enumerate(all_docs[:20])
+        ) if all_docs else "(No KB content)"
+
+        summary_text = context.get("summary", "") if context else ""
+        topics = context.get("topics", []) if context else []
+
+        from app.prompts.strategic_analysis_prompts import STRATEGIC_ANALYSIS_PROMPT
+        llm = get_llm("context_analysis")
+        chain = STRATEGIC_ANALYSIS_PROMPT | llm | StrOutputParser()
+
         try:
-            # Strategic analysis needs refactoring for stateless mode.
-            # For now, build a basic strategic view from context + KB search.
-            context = core_client.get_context_summary(
-                tenant_id=tenant_id, client_id=client_id,
-            )
-            docs = core_client.search_graph(
-                tenant_id=tenant_id, client_id=client_id,
-                query="strategy goals challenges opportunities trends",
-                top_k=15, hop_limit=1,
-            )
-
-            if not context and not docs:
-                return {"error": "No data available for strategic analysis", "executive_summary": "", "action_points": []}
-
-            # Use the context summary + KB content as a lightweight strategic view
-            summary = context.get("summary", "") if context else ""
-            topics = context.get("topics", []) if context else []
-            doc_excerpts = [d.page_content[:200] for d in docs[:5]] if docs else []
-
+            import json
+            raw = chain.invoke({
+                "kg_context": kb_context,
+                "context_summary": summary_text,
+                "transcript_context": "(No transcripts available — use KB content only)",
+                "transcript_count": "0",
+                "web_context": "(No web search performed)",
+                "profile_section": "",
+                "depth_instructions": "Provide a foundational strategic overview based on available documentation.",
+            })
+            return json.loads(raw)
+        except Exception as e:
+            logger.warning("run_strategic_analysis LLM failed: %s", e)
             return {
-                "executive_summary": summary,
+                "executive_summary": summary_text,
                 "convergent_themes": topics,
                 "action_points": [],
-                "sources_used": {
-                    "kg_chunks_retrieved": len(docs) if docs else 0,
-                    "context_summary_available": context is not None,
-                },
+                "sources_used": {"kg_chunks_retrieved": len(all_docs), "context_summary_available": context is not None},
             }
-        except Exception as e:
-            logger.warning("run_strategic_analysis failed: %s", e)
-            return {"error": str(e), "executive_summary": "", "action_points": []}
 
     # ── Gap tool ────────────────────────────────────────────────────────
 
@@ -236,7 +302,6 @@ def create_insights_tools(
         """Identify knowledge gaps and recommend web sources to fill them.
 
         Call this after analysis to find what's missing from the KB.
-        Returns gaps with search queries and recommended sources.
         """
         try:
             from app.agents.enrichment_agent import run_enrichment_agent

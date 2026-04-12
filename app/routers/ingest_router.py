@@ -25,6 +25,12 @@ from app.models.api.ingest import (
     IngestWebRequest,
     IngestWebResponse,
     IngestStatusResponse,
+    IngestSurveyResultsRequest,
+    IngestSurveyResultsResponse,
+    IngestTranscriptRequest,
+    IngestTranscriptResponse,
+    BatchSurveyResultsRequest,
+    BatchTranscriptRequest,
     BatchWebRequest,
     BatchIngestResponse,
     BatchIngestStatusResponse,
@@ -391,3 +397,216 @@ def batch_ingest_status(batch_id: str) -> BatchIngestStatusResponse:
         failed=batch["failed"], running=batch["running"], status=batch["status"],
         items=[BatchItemStatus(**it) for it in batch["items"]],
     )
+
+
+# -- Survey results ingest --
+
+
+def _run_survey_results_ingest(
+    job_id: str,
+    req: IngestSurveyResultsRequest,
+) -> None:
+    _jobs[job_id] = {"status": "running"}
+    try:
+        svc = IngestService()
+        result = svc.ingest_survey_results(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            responses=[r.model_dump() for r in req.responses],
+            survey_id=req.survey_id,
+            survey_title=req.survey_title,
+            respondent_id=req.respondent_id,
+            metadata=req.metadata,
+        )
+        # Trigger context rebuild
+        try:
+            from app.agents.context_agent import run_context_agent
+            run_context_agent(
+                tenant_id=str(req.tenant_id), client_id=str(req.client_id),
+                force_regenerate=True,
+            )
+        except Exception:
+            pass
+
+        _jobs[job_id] = {
+            "status": "complete",
+            "chunks_upserted": result.get("chunks_upserted", 0),
+            "warnings": result.get("warnings", []),
+        }
+    except Exception as e:
+        logger.exception("Survey results ingest failed")
+        _jobs[job_id] = {"status": "failed", "detail": str(e)}
+
+
+@router.post("/survey-results", response_model=IngestSurveyResultsResponse, status_code=202)
+def ingest_survey_results(
+    req: IngestSurveyResultsRequest,
+    background_tasks: BackgroundTasks,
+) -> IngestSurveyResultsResponse:
+    """Ingest completed survey responses as searchable KB chunks."""
+    job_id = str(uuid.uuid4())
+    background_tasks.add_task(_run_survey_results_ingest, job_id, req)
+    return IngestSurveyResultsResponse(job_id=job_id)
+
+
+def _run_batch_survey_results_ingest(
+    batch_id: str,
+    req: BatchSurveyResultsRequest,
+) -> None:
+    total_chunks = 0
+    items_status = []
+    for i, item in enumerate(req.items):
+        try:
+            svc = IngestService()
+            result = svc.ingest_survey_results(
+                tenant_id=str(item.tenant_id),
+                client_id=str(item.client_id),
+                responses=[r.model_dump() for r in item.responses],
+                survey_id=item.survey_id or req.survey_id,
+                survey_title=item.survey_title or req.survey_title,
+                respondent_id=item.respondent_id,
+                metadata=item.metadata,
+            )
+            total_chunks += result.get("chunks_upserted", 0)
+            items_status.append({"index": i, "status": "complete", "chunks": result.get("chunks_upserted", 0)})
+        except Exception as e:
+            items_status.append({"index": i, "status": "failed", "error": str(e)})
+
+    # Context rebuild once
+    if total_chunks > 0:
+        try:
+            from app.agents.context_agent import run_context_agent
+            run_context_agent(
+                tenant_id=str(req.tenant_id), client_id=str(req.client_id),
+                force_regenerate=True,
+            )
+        except Exception:
+            pass
+
+    _batches[batch_id] = {
+        "status": "complete" if all(s["status"] == "complete" for s in items_status) else "partial_failure",
+        "total": len(req.items),
+        "completed": sum(1 for s in items_status if s["status"] == "complete"),
+        "failed": sum(1 for s in items_status if s["status"] == "failed"),
+        "running": 0,
+        "items": items_status,
+        "total_chunks": total_chunks,
+    }
+
+
+@router.post("/survey-results/batch", status_code=202)
+def batch_ingest_survey_results(
+    req: BatchSurveyResultsRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Batch ingest multiple survey response sets."""
+    batch_id = str(uuid.uuid4())
+    _batches[batch_id] = {"status": "running", "total": len(req.items)}
+    background_tasks.add_task(_run_batch_survey_results_ingest, batch_id, req)
+    return {"batch_id": batch_id, "total": len(req.items), "status": "running"}
+
+
+# -- Transcript ingest --
+
+
+def _run_transcript_ingest(
+    job_id: str,
+    req: IngestTranscriptRequest,
+) -> None:
+    _jobs[job_id] = {"status": "running"}
+    try:
+        svc = IngestService()
+        result = svc.ingest_transcript(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            content=req.content,
+            title=req.title,
+            source=req.source,
+            metadata=req.metadata,
+        )
+        # Trigger context rebuild
+        try:
+            from app.agents.context_agent import run_context_agent
+            run_context_agent(
+                tenant_id=str(req.tenant_id), client_id=str(req.client_id),
+                force_regenerate=True,
+            )
+        except Exception:
+            pass
+
+        _jobs[job_id] = {
+            "status": "complete",
+            "chunks_upserted": result.get("chunks_upserted", 0),
+            "entities_extracted": result.get("entities_extracted", 0),
+            "warnings": result.get("warnings", []),
+        }
+    except Exception as e:
+        logger.exception("Transcript ingest failed")
+        _jobs[job_id] = {"status": "failed", "detail": str(e)}
+
+
+@router.post("/transcript", response_model=IngestTranscriptResponse, status_code=202)
+def ingest_transcript(
+    req: IngestTranscriptRequest,
+    background_tasks: BackgroundTasks,
+) -> IngestTranscriptResponse:
+    """Ingest a raw transcript as searchable KB chunks with NER."""
+    job_id = str(uuid.uuid4())
+    background_tasks.add_task(_run_transcript_ingest, job_id, req)
+    return IngestTranscriptResponse(job_id=job_id)
+
+
+def _run_batch_transcript_ingest(
+    batch_id: str,
+    req: BatchTranscriptRequest,
+) -> None:
+    total_chunks = 0
+    items_status = []
+    for i, item in enumerate(req.items):
+        try:
+            svc = IngestService()
+            result = svc.ingest_transcript(
+                tenant_id=str(item.tenant_id),
+                client_id=str(item.client_id),
+                content=item.content,
+                title=item.title,
+                source=item.source,
+                metadata=item.metadata,
+            )
+            total_chunks += result.get("chunks_upserted", 0)
+            items_status.append({"index": i, "status": "complete", "chunks": result.get("chunks_upserted", 0)})
+        except Exception as e:
+            items_status.append({"index": i, "status": "failed", "error": str(e)})
+
+    # Context rebuild once
+    if total_chunks > 0:
+        try:
+            from app.agents.context_agent import run_context_agent
+            run_context_agent(
+                tenant_id=str(req.tenant_id), client_id=str(req.client_id),
+                force_regenerate=True,
+            )
+        except Exception:
+            pass
+
+    _batches[batch_id] = {
+        "status": "complete" if all(s["status"] == "complete" for s in items_status) else "partial_failure",
+        "total": len(req.items),
+        "completed": sum(1 for s in items_status if s["status"] == "complete"),
+        "failed": sum(1 for s in items_status if s["status"] == "failed"),
+        "running": 0,
+        "items": items_status,
+        "total_chunks": total_chunks,
+    }
+
+
+@router.post("/transcript/batch", status_code=202)
+def batch_ingest_transcripts(
+    req: BatchTranscriptRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Batch ingest multiple transcripts."""
+    batch_id = str(uuid.uuid4())
+    _batches[batch_id] = {"status": "running", "total": len(req.items)}
+    background_tasks.add_task(_run_batch_transcript_ingest, batch_id, req)
+    return {"batch_id": batch_id, "total": len(req.items), "status": "running"}

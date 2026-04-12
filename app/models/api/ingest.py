@@ -145,3 +145,60 @@ class BatchIngestStatusResponse(BaseModel):
     running: int
     status: str                # "running" | "complete" | "partial_failure"
     items: List[BatchItemStatus] = []
+
+
+# -- Survey results ingest --
+
+
+class SurveyResponseItem(BaseModel):
+    """A single question + response pair."""
+    question_id: Optional[str] = None
+    question_type: str = Field(description="multiple_choice, rating, nps, yes_no, etc.")
+    question_label: str = Field(description="The question text")
+    response: Any = Field(description="The response value (string, number, list, etc.)")
+    options: Optional[List[str]] = Field(default=None, description="Options for choice questions")
+
+
+class IngestSurveyResultsRequest(TenantScoped):
+    """Ingest completed survey responses as KB chunks."""
+    survey_id: Optional[str] = Field(default=None, description="ID of the survey these responses belong to")
+    survey_title: Optional[str] = Field(default=None, description="Title of the survey")
+    responses: List[SurveyResponseItem] = Field(..., min_length=1, description="List of question+response pairs")
+    respondent_id: Optional[str] = Field(default=None, description="Anonymous respondent identifier")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchSurveyResultsRequest(TenantScoped):
+    """Batch ingest multiple survey response sets."""
+    survey_id: Optional[str] = None
+    survey_title: Optional[str] = None
+    items: List[IngestSurveyResultsRequest] = Field(..., min_length=1, max_length=200)
+
+
+class IngestSurveyResultsResponse(BaseModel):
+    job_id: str
+    chunks_upserted: int = 0
+    status: str = "pending"
+
+
+# -- Transcript ingest --
+
+
+class IngestTranscriptRequest(TenantScoped):
+    """Ingest a transcript as KB chunks."""
+    title: Optional[str] = Field(default=None, description="Title or label for the transcript")
+    content: str = Field(..., min_length=10, description="Raw transcript text")
+    source: Optional[str] = Field(default=None, description="Where it came from (e.g., 'Zoom', 'Gong', 'manual')")
+    speaker_labels: bool = Field(default=False, description="Whether content includes speaker labels")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchTranscriptRequest(TenantScoped):
+    """Batch ingest multiple transcripts."""
+    items: List[IngestTranscriptRequest] = Field(..., min_length=1, max_length=50)
+
+
+class IngestTranscriptResponse(BaseModel):
+    job_id: str
+    chunks_upserted: int = 0
+    status: str = "pending"

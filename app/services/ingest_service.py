@@ -331,6 +331,158 @@ class IngestService:
         out._processed_chunks = chunks  # for context agent
         return out
 
+    # ── Survey results ingest ──────────────────────────────────────────
+
+    def ingest_survey_results(
+        self,
+        *,
+        tenant_id: str,
+        client_id: str,
+        responses: list,
+        survey_id: str | None = None,
+        survey_title: str | None = None,
+        respondent_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Convert survey responses into chunks and send to core API.
+
+        Each response set is formatted as readable text chunks containing
+        the question, response, and context. This makes survey data
+        searchable via the KB.
+        """
+        if not responses:
+            return {"chunks_upserted": 0, "warnings": ["No responses provided."]}
+
+        # Format responses as text chunks
+        chunks = []
+        header = f"Survey: {survey_title or 'Untitled'}"
+        if respondent_id:
+            header += f" | Respondent: {respondent_id}"
+
+        # Group into chunks of ~5 responses each
+        batch_size = 5
+        for i in range(0, len(responses), batch_size):
+            batch = responses[i:i + batch_size]
+            lines = [header, ""]
+            for r in batch:
+                q_label = r.question_label if hasattr(r, 'question_label') else r.get("question_label", "")
+                q_type = r.question_type if hasattr(r, 'question_type') else r.get("question_type", "")
+                response = r.response if hasattr(r, 'response') else r.get("response", "")
+                lines.append(f"Q ({q_type}): {q_label}")
+                lines.append(f"A: {response}")
+                lines.append("")
+
+            text = "\n".join(lines).strip()
+            if text:
+                token_count = ChunkingService.llm_token_len(text)
+                chunks.append({
+                    "text": text,
+                    "start_page": None,
+                    "end_page": None,
+                    "token_count": token_count,
+                })
+
+        if not chunks:
+            return {"chunks_upserted": 0, "warnings": ["No usable content from responses."]}
+
+        # Filter English
+        chunks, warnings = self._process_chunks(chunks)
+        if not chunks:
+            return {"chunks_upserted": 0, "warnings": warnings}
+
+        # Send to core API
+        try:
+            result = core_client.ingest_web_scraped(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                url=f"survey:{survey_id or 'unknown'}",
+                title=survey_title or "Survey Results",
+                metadata={
+                    **(metadata or {}),
+                    "source_type": "survey_results",
+                    "survey_id": survey_id,
+                    "respondent_id": respondent_id,
+                },
+                chunks=chunks,
+                entities=[],
+            )
+            warnings.extend(result.get("warnings", []))
+            return {
+                "chunks_upserted": result.get("chunks_upserted", len(chunks)),
+                "warnings": warnings,
+            }
+        except Exception as e:
+            warnings.append(f"Core API storage failed: {e}")
+            return {"chunks_upserted": 0, "warnings": warnings}
+
+    # ── Transcript ingest ────────────────────────────────────────────────
+
+    def ingest_transcript(
+        self,
+        *,
+        tenant_id: str,
+        client_id: str,
+        content: str,
+        title: str | None = None,
+        source: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Chunk raw transcript text and send to core API.
+
+        Accepts plain text transcripts (not VTT files — those go through
+        /ingest/file). Handles text from Zoom, Gong, call recordings, etc.
+        """
+        if not content or len(content.strip()) < 10:
+            return {"chunks_upserted": 0, "warnings": ["Transcript content too short."]}
+
+        # Build pages from transcript text (treat as one long document)
+        pages = [{"page": 1, "text": content}]
+
+        try:
+            chunks = ChunkingService.chunk_pages_spacy_token_aware(pages)
+        except Exception as e:
+            return {"chunks_upserted": 0, "warnings": [f"Chunking failed: {e}"]}
+
+        if not chunks:
+            return {"chunks_upserted": 0, "warnings": ["Chunking produced no output."]}
+
+        # Filter English
+        chunks, warnings = self._process_chunks(chunks)
+        if not chunks:
+            return {"chunks_upserted": 0, "warnings": warnings}
+
+        # NER on transcript content
+        entities = []
+        try:
+            entities = self._extract_entities_llm(chunks)
+        except Exception as e:
+            warnings.append(f"NER failed: {e}")
+
+        # Send to core API
+        try:
+            result = core_client.ingest_web_scraped(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                url=f"transcript:{title or 'untitled'}",
+                title=title or "Transcript",
+                metadata={
+                    **(metadata or {}),
+                    "source_type": "transcript",
+                    "transcript_source": source or "unknown",
+                },
+                chunks=chunks,
+                entities=entities,
+            )
+            warnings.extend(result.get("warnings", []))
+            return {
+                "chunks_upserted": result.get("chunks_upserted", len(chunks)),
+                "entities_extracted": len(entities),
+                "warnings": warnings,
+            }
+        except Exception as e:
+            warnings.append(f"Core API storage failed: {e}")
+            return {"chunks_upserted": 0, "warnings": warnings}
+
     # ── Entry point ──────────────────────────────────────────────────────
 
     def ingest(self, inp: IngestInput) -> IngestOutput:

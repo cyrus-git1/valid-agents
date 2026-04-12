@@ -82,13 +82,20 @@ def create_insights_tools(
             "has_documents": document_count > 0,
         }
 
+    _persona_cache: list = []
+    _persona_ran: list = [False]  # mutable flag in closure
+
     @tool
     def get_personas() -> List[Dict[str, Any]]:
         """Get audience personas for this tenant.
 
-        Runs the persona agent. Returns list of persona dicts.
-        If it fails or returns empty, that's fine — continue without personas.
+        Runs the persona agent once. Cached across retries — won't re-run
+        the full persona agent on harness retry.
         """
+        if _persona_ran[0]:
+            return _persona_cache
+
+        _persona_ran[0] = True
         try:
             from app.agents.persona_agent import run_persona_agent
             result = run_persona_agent(
@@ -96,7 +103,9 @@ def create_insights_tools(
                 client_id=client_id,
                 client_profile=client_profile,
             )
-            return result.get("personas", [])
+            personas = result.get("personas", [])
+            _persona_cache.extend(personas)
+            return personas
         except Exception as e:
             logger.warning("get_personas failed: %s", e)
             return []

@@ -753,8 +753,8 @@ PERSONA_STEP_CONFIG = StepConfig(
         RubricDimension("profile_alignment", 0.15, "Do personas reflect the client's industry and demographic context?"),
     ],
     score_threshold=0.7,
-    max_retries=1,
-    use_manager=True,
+    max_retries=0,
+    use_manager=False,
 )
 
 
@@ -851,6 +851,6 @@ INSIGHTS_STEP_CONFIG = StepConfig(
         RubricDimension("persona_integration", 0.15, "Are findings contextualized by audience personas when available?"),
     ],
     score_threshold=0.7,
-    max_retries=1,
-    use_manager=True,
+    max_retries=0,        # no retries — too expensive for ReAct agent
+    use_manager=False,    # disabled until all data sources are working
 )

@@ -785,8 +785,9 @@ def cheap_check_insights(output: Any) -> CheapCheckResult:
             return CheapCheckResult(False, f"Finding {i} is not an object.")
         if not f.get("finding"):
             return CheapCheckResult(False, f"Finding {i} is missing 'finding' text.")
-        if not f.get("evidence_sources") or not isinstance(f["evidence_sources"], list):
-            return CheapCheckResult(False, f"Finding {i} has no evidence_sources.")
+        # evidence_sources should be a list (can be empty if data sources were limited)
+        if "evidence_sources" in f and not isinstance(f["evidence_sources"], list):
+            return CheapCheckResult(False, f"Finding {i} evidence_sources must be a list.")
 
     recs = output.get("recommendations", [])
     if not isinstance(recs, list) or len(recs) < 1:

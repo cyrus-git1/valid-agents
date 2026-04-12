@@ -33,6 +33,8 @@ If transcripts, surveys, or documents are missing, DO NOT stop. Continue with wh
 - Maximum 15 tool calls. Be efficient — don't call tools for data that doesn't exist.
 - Don't call analyze_sentiment if transcript_count is 0.
 - Don't call compute_confidence_intervals if survey_count is 0.
+- Don't call get_personas if has_documents is false — personas need KB content.
+- If a tool returns an error or empty result, do NOT retry it. Note it as a data gap and move on.
 
 ## Output format
 Produce a JSON object with this structure:

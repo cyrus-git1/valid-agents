@@ -86,7 +86,8 @@ def create_insights_tools(
     def get_personas() -> List[Dict[str, Any]]:
         """Get audience personas for this tenant.
 
-        Runs the persona agent. Returns list of persona dicts with evidence_sources.
+        Runs the persona agent. Returns list of persona dicts.
+        If it fails or returns empty, that's fine — continue without personas.
         """
         try:
             from app.agents.persona_agent import run_persona_agent
@@ -198,17 +199,21 @@ def create_insights_tools(
     def compute_confidence_intervals() -> List[Dict[str, Any]]:
         """Compute confidence intervals on survey response data.
 
-        Returns per-question statistical confidence intervals.
         Only call if check_available_data showed survey_count > 0.
+        If no survey data is available, returns empty — don't retry.
         """
         try:
             import json
             surveys = core_client.get_survey_outputs(
                 tenant_id=tenant_id, client_id=client_id, limit=10,
             )
-            if not surveys:
-                return []
+        except Exception:
+            return []  # Core API error — skip silently
 
+        if not surveys:
+            return []
+
+        try:
             from app.analysis.confidence_interval import ConfidenceIntervalService
             svc = ConfidenceIntervalService()
 

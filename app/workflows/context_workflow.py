@@ -62,9 +62,10 @@ def check_existing(state: ContextState) -> ContextState:
 
 
 def retrieve_kg_content(state: ContextState) -> ContextState:
-    """Retrieve KG content with multiple diverse queries."""
+    """Retrieve KG content with multiple diverse queries + merge new chunks."""
     all_results: Dict[str, Dict[str, Any]] = {}
 
+    # Search existing KB content
     for query in _COVERAGE_QUERIES:
         results = search_knowledge_base.invoke({
             "tenant_id": state["tenant_id"],
@@ -78,6 +79,22 @@ def retrieve_kg_content(state: ContextState) -> ContextState:
             if nid and nid not in all_results:
                 all_results[nid] = r
 
+    # Merge new chunks that may not be indexed yet
+    new_chunks = state.get("new_chunks", [])
+    for i, chunk in enumerate(new_chunks):
+        text = chunk.get("text", "").strip()
+        if text:
+            fake_id = f"new_chunk_{i}"
+            if fake_id not in all_results:
+                all_results[fake_id] = {
+                    "content": text,
+                    "similarity_score": 1.0,  # prioritize new content
+                    "node_id": fake_id,
+                    "source": "new_ingest",
+                }
+
+    total_sources = len(all_results)
+
     if not all_results:
         return {
             **state,
@@ -88,22 +105,21 @@ def retrieve_kg_content(state: ContextState) -> ContextState:
             "error": "No content found in knowledge base. Ingest documents first.",
         }
 
-    # Not enough content to generate a meaningful summary
-    if len(all_results) < 3:
+    if total_sources < 3 and not new_chunks:
         return {
             **state,
             "kg_results": list(all_results.values()),
             "kg_context": "",
-            "context_sampled": len(all_results),
+            "context_sampled": total_sources,
             "status": "insufficient_content",
-            "error": f"Only {len(all_results)} KG nodes found. Need at least 3 for a meaningful summary.",
+            "error": f"Only {total_sources} sources found. Need at least 3 for a meaningful summary.",
         }
 
     sorted_results = sorted(
         all_results.values(),
         key=lambda r: r.get("similarity_score") or 0.0,
         reverse=True,
-    )[:15]
+    )[:20]  # slightly more to include both old and new
 
     context = "\n\n---\n\n".join(
         f"[Excerpt {i + 1}]\n{r['content']}"

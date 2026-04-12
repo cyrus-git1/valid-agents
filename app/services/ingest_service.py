@@ -231,7 +231,7 @@ class IngestService:
             doc_id = "00000000-0000-0000-0000-000000000000"
             chunks_stored = 0
 
-        return IngestOutput(
+        out = IngestOutput(
             document_id=UUID(doc_id) if isinstance(doc_id, str) else doc_id,
             source_type=file_type,
             source_uri=f"file:{file_name}",
@@ -239,6 +239,8 @@ class IngestService:
             entities_linked=len(entities),
             warnings=warnings,
         )
+        out._processed_chunks = chunks  # for context agent
+        return out
 
     # ── Web ingest ───────────────────────────────────────────────────────
 
@@ -318,7 +320,7 @@ class IngestService:
             doc_id = "00000000-0000-0000-0000-000000000000"
             chunks_stored = 0
 
-        return IngestOutput(
+        out = IngestOutput(
             document_id=UUID(doc_id) if isinstance(doc_id, str) else doc_id,
             source_type="web",
             source_uri=url,
@@ -326,6 +328,8 @@ class IngestService:
             entities_linked=len(entities),
             warnings=warnings,
         )
+        out._processed_chunks = chunks  # for context agent
+        return out
 
     # ── Entry point ──────────────────────────────────────────────────────
 
@@ -341,11 +345,15 @@ class IngestService:
         if result.chunks_upserted > 0 and not inp.skip_context_generation:
             try:
                 from app.agents.context_agent import run_context_agent
+                # Pass the chunks we just processed so the context summary
+                # includes new content that may not be indexed in the KB yet
+                processed_chunks = getattr(result, '_processed_chunks', [])
                 ctx_result = run_context_agent(
                     tenant_id=str(inp.tenant_id),
                     client_id=str(inp.client_id),
                     client_profile=inp.metadata.get("client_profile") if inp.metadata else None,
                     force_regenerate=True,
+                    new_chunks=processed_chunks,
                 )
                 if not ctx_result.get("has_summary"):
                     result.warnings.append(

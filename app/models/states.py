@@ -52,6 +52,7 @@ class ContextState(TypedDict, total=False):
     client_id: str
     client_profile: Dict[str, Any]
     force_regenerate: bool
+    new_chunks: List[Dict[str, Any]]  # chunks from just-completed ingest (not yet indexed)
     # Step outputs
     existing_summary: Optional[Dict[str, Any]]
     kg_results: List[Dict[str, Any]]

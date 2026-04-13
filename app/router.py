@@ -21,6 +21,7 @@ from app.models.survey import (
     GenerateDescriptionRequest, GenerateDescriptionResponse,
     GenerateFollowUpRequest, GenerateFollowUpResponse,
     GenerateQuestionRequest, GenerateQuestionResponse,
+    GenerateScopedRequest, GenerateScopedResponse,
     GenerateTitleRequest, GenerateTitleResponse,
     GenerateWholeRequest, GenerateWholeResponse,
     SurveyGenerateRequest, SurveyGenerateResponse,
@@ -250,3 +251,111 @@ def survey_generate_description(req: GenerateDescriptionRequest) -> GenerateDesc
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Description generation failed: {e}")
     return GenerateDescriptionResponse(description=result.get("description", ""), status=result.get("status", "complete"), error=result.get("error"))
+
+
+@survey_router.post("/generate-scoped", response_model=GenerateScopedResponse)
+def survey_generate_scoped(req: GenerateScopedRequest) -> GenerateScopedResponse:
+    """Generate more questions within the scope of an existing survey.
+
+    Fast path: one KB search + one LLM call. No harness manager eval.
+    Uses title + description as scope boundaries. Questions must be
+    relevant to the seed question's topic and the company's KB content.
+    """
+    import json as _json
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+    from app.llm_config import get_llm
+    from app.prompts.survey_prompts import SURVEY_OUTPUT_FORMAT_PROMPT, get_question_type_instructions
+    from app.workflows._helpers import normalize_question
+
+    # KB search based on the seed question + title
+    search_query = f"{req.seed_question.label} {req.title}"
+    kb_context = ""
+    try:
+        docs = core_client.search_graph(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            query=search_query,
+            top_k=5,
+            hop_limit=1,
+            node_types=["Chunk"],
+        )
+        if docs:
+            kb_context = "\n\n".join(d.page_content[:300] for d in docs[:5])
+    except Exception:
+        pass
+
+    # Build existing questions text
+    existing_text = ""
+    all_existing = [req.seed_question] + (req.existing_questions or [])
+    if all_existing:
+        existing_text = "\n".join(
+            f"- [{q.type}] {q.label}" for q in all_existing
+        )
+
+    question_type_instructions = get_question_type_instructions(req.question_types)
+
+    prompt = ChatPromptTemplate.from_messages([
+        (
+            "system",
+            "You are an expert survey designer. Generate additional questions that "
+            "stay STRICTLY within the scope defined by the survey title and description.\n\n"
+            "Rules:\n"
+            "- Every question must be relevant to BOTH the title/description scope AND "
+            "the seed question's topic area\n"
+            "- Do NOT drift to other topics — if the title says 'Pricing Experience' "
+            "only generate pricing-related questions\n"
+            "- Do NOT duplicate existing questions — complement them\n"
+            "- Use the KB context to make questions specific to the company\n"
+            "- Use diverse question types from the allowed list\n\n"
+            + question_type_instructions + "\n\n"
+            + SURVEY_OUTPUT_FORMAT_PROMPT
+        ),
+        (
+            "human",
+            "Survey Title: {title}\n"
+            "Survey Description: {description}\n\n"
+            "Seed Question: [{seed_type}] {seed_label}\n\n"
+            "Existing Questions (do not duplicate):\n{existing}\n\n"
+            "KB Context:\n{kb_context}\n\n"
+            "Generate {count} more questions within this scope."
+        ),
+    ])
+
+    llm = get_llm("survey_generation")
+    chain = prompt | llm | StrOutputParser()
+
+    try:
+        raw = chain.invoke({
+            "title": req.title,
+            "description": req.description,
+            "seed_type": req.seed_question.type,
+            "seed_label": req.seed_question.label,
+            "existing": existing_text or "(none)",
+            "kb_context": kb_context or "(no KB context available)",
+            "count": str(req.count),
+        })
+
+        # Parse
+        import re
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            match = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)
+            if match:
+                cleaned = match.group(1).strip()
+
+        parsed = _json.loads(cleaned)
+        if isinstance(parsed, dict) and "questions" in parsed:
+            parsed = parsed["questions"]
+        if not isinstance(parsed, list):
+            parsed = []
+
+        normalized = [normalize_question(q) for q in parsed]
+
+        return GenerateScopedResponse(
+            questions=_parse_questions(normalized),
+            status="complete",
+        )
+    except Exception as e:
+        logger.exception("Scoped generation failed")
+        raise HTTPException(status_code=500, detail=f"Scoped generation failed: {e}")

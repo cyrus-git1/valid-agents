@@ -208,6 +208,27 @@ class GenerateWholeResponse(StatusResponse):
         return super().model_dump(**kwargs)
 
 
+# ── Scoped question generation (fast) ────────────────────────────────────────
+
+
+class GenerateScopedRequest(TenantScopedRequest):
+    """Generate more questions within the scope of an existing survey."""
+    seed_question: SurveyQuestionItem = Field(description="The question to expand on")
+    title: str = Field(..., description="Survey title — defines the scope boundary")
+    description: str = Field(..., description="Survey description — defines what's in/out of scope")
+    existing_questions: List[SurveyQuestionItem] = Field(
+        default_factory=list, description="Other questions already in the survey (to avoid duplicates)"
+    )
+    question_types: List[str] = Field(
+        default=ALL_QUESTION_TYPES, description="Allowed question types"
+    )
+    count: int = Field(default=3, ge=1, le=10, description="Number of questions to generate")
+
+
+class GenerateScopedResponse(StatusResponse):
+    questions: List[SurveyQuestionItem] = Field(default_factory=list)
+
+
 # ── Survey output storage ────────────────────────────────────────────────────
 
 

@@ -255,42 +255,42 @@ def survey_generate_description(req: GenerateDescriptionRequest) -> GenerateDesc
 
 @survey_router.post("/generate-scoped", response_model=GenerateScopedResponse)
 def survey_generate_scoped(req: GenerateScopedRequest) -> GenerateScopedResponse:
-    """Generate more questions within the scope of an existing survey.
+    """Generate questions within the scope of a survey's title and description.
 
     Fast path: one KB search + one LLM call. No harness manager eval.
-    Uses title + description as scope boundaries. Questions must be
-    relevant to the seed question's topic and the company's KB content.
+    Title + description define the scope. Existing questions are accounted
+    for — no duplicates, complements what's already there.
     """
     import json as _json
+    import re
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
     from app.llm_config import get_llm
     from app.prompts.survey_prompts import SURVEY_OUTPUT_FORMAT_PROMPT, get_question_type_instructions
     from app.workflows._helpers import normalize_question
 
-    # KB search based on the seed question + title
-    search_query = f"{req.seed_question.label} {req.title}"
+    # KB search based on title + description
+    search_query = f"{req.title} {req.description}"
     kb_context = ""
     try:
         docs = core_client.search_graph(
             tenant_id=str(req.tenant_id),
             client_id=str(req.client_id),
             query=search_query,
-            top_k=5,
+            top_k=8,
             hop_limit=1,
             node_types=["Chunk"],
         )
         if docs:
-            kb_context = "\n\n".join(d.page_content[:300] for d in docs[:5])
+            kb_context = "\n\n".join(d.page_content[:300] for d in docs[:8])
     except Exception:
         pass
 
     # Build existing questions text
-    existing_text = ""
-    all_existing = [req.seed_question] + (req.existing_questions or [])
-    if all_existing:
+    existing_text = "(none)"
+    if req.existing_questions:
         existing_text = "\n".join(
-            f"- [{q.type}] {q.label}" for q in all_existing
+            f"- [{q.type}] {q.label}" for q in req.existing_questions
         )
 
     question_type_instructions = get_question_type_instructions(req.question_types)
@@ -298,14 +298,14 @@ def survey_generate_scoped(req: GenerateScopedRequest) -> GenerateScopedResponse
     prompt = ChatPromptTemplate.from_messages([
         (
             "system",
-            "You are an expert survey designer. Generate additional questions that "
+            "You are an expert survey designer. Generate questions that "
             "stay STRICTLY within the scope defined by the survey title and description.\n\n"
             "Rules:\n"
-            "- Every question must be relevant to BOTH the title/description scope AND "
-            "the seed question's topic area\n"
+            "- Every question MUST be directly relevant to the title and description\n"
             "- Do NOT drift to other topics — if the title says 'Pricing Experience' "
             "only generate pricing-related questions\n"
-            "- Do NOT duplicate existing questions — complement them\n"
+            "- Account for existing questions: complement them, fill gaps they missed, "
+            "go deeper on their topics — but do NOT duplicate them\n"
             "- Use the KB context to make questions specific to the company\n"
             "- Use diverse question types from the allowed list\n\n"
             + question_type_instructions + "\n\n"
@@ -315,8 +315,7 @@ def survey_generate_scoped(req: GenerateScopedRequest) -> GenerateScopedResponse
             "human",
             "Survey Title: {title}\n"
             "Survey Description: {description}\n\n"
-            "Seed Question: [{seed_type}] {seed_label}\n\n"
-            "Existing Questions (do not duplicate):\n{existing}\n\n"
+            "Existing Questions (account for these, do not duplicate):\n{existing}\n\n"
             "KB Context:\n{kb_context}\n\n"
             "Generate {count} more questions within this scope."
         ),
@@ -329,15 +328,11 @@ def survey_generate_scoped(req: GenerateScopedRequest) -> GenerateScopedResponse
         raw = chain.invoke({
             "title": req.title,
             "description": req.description,
-            "seed_type": req.seed_question.type,
-            "seed_label": req.seed_question.label,
-            "existing": existing_text or "(none)",
+            "existing": existing_text,
             "kb_context": kb_context or "(no KB context available)",
             "count": str(req.count),
         })
 
-        # Parse
-        import re
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             match = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)

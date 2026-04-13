@@ -212,12 +212,11 @@ class GenerateWholeResponse(StatusResponse):
 
 
 class GenerateScopedRequest(TenantScopedRequest):
-    """Generate more questions within the scope of an existing survey."""
-    seed_question: SurveyQuestionItem = Field(description="The question to expand on")
-    title: str = Field(..., description="Survey title — defines the scope boundary")
+    """Generate questions within the scope of a survey's title and description."""
+    title: str = Field(..., description="Survey title — defines the scope")
     description: str = Field(..., description="Survey description — defines what's in/out of scope")
     existing_questions: List[SurveyQuestionItem] = Field(
-        default_factory=list, description="Other questions already in the survey (to avoid duplicates)"
+        default_factory=list, description="Questions already in the survey (to avoid duplicates and build on)"
     )
     question_types: List[str] = Field(
         default=ALL_QUESTION_TYPES, description="Allowed question types"

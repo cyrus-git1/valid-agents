@@ -152,14 +152,19 @@ def create_service_tools(
 
         Scrapes the URL, chunks the content, extracts entities, and
         stores everything in the KB. Also regenerates the context summary.
+        Accepts URLs with or without https:// prefix.
         """
         try:
             from app.models.ingest import IngestInput
             from app.services.ingest.service import IngestService
+            # Normalize URL — add https:// if missing
+            url = web_url.strip()
+            if not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
             inp = IngestInput(
                 tenant_id=UUID(tenant_id),
                 client_id=UUID(client_id),
-                web_url=web_url,
+                web_url=url,
                 title=title,
             )
             result = IngestService().ingest(inp)

@@ -108,17 +108,28 @@ _CONVERSATION_PATTERNS = {
 }
 
 
+_TOOL_KEYWORDS = {
+    "survey", "persona", "ingest", "document", "search", "enrich",
+    "summary", "context", "question", "analyze", "flag", "revise",
+    "upload", "add", "import", "delete", "list", "find", "generate",
+    "create", "build", "tell me", "what", "who", "how", "why",
+}
+
+
 def _is_likely_conversation(request: str) -> bool:
     """Fast keyword check to skip the planner for obvious chitchat."""
     cleaned = request.strip().lower().rstrip("!?.,:;")
     # Exact match on short messages
     if cleaned in _CONVERSATION_PATTERNS:
         return True
-    # Very short messages (< 4 words) that aren't questions about data
+    # Contains a URL or domain — never conversation
+    if "http://" in cleaned or "https://" in cleaned:
+        return False
     words = cleaned.split()
-    if len(words) <= 3 and not any(
-        kw in cleaned for kw in ("survey", "persona", "ingest", "document", "search", "enrich", "summary")
-    ):
+    if words and "." in words[-1]:
+        return False
+    # Very short messages (< 4 words) that aren't tool-related
+    if len(words) <= 3 and not any(kw in cleaned for kw in _TOOL_KEYWORDS):
         return True
     return False
 

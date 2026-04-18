@@ -410,18 +410,33 @@ _AFFIRMATION_PHRASES = [
 
 
 def _is_just_affirmation(text: str) -> bool:
-    """Check if the text is just an acknowledgment with no real content."""
+    """Check if the text is just an acknowledgment with no real content.
+
+    An affirmation is a short message that acknowledges the user's request
+    but doesn't contain actual data (numbers, lists, specific answers).
+    """
     cleaned = text.strip().lower()
-    # Short messages that are just affirmations
-    if len(cleaned) < 200 and any(phrase in cleaned for phrase in _AFFIRMATION_PHRASES):
-        # Check if there's actual data content beyond the affirmation
-        has_data = any(
-            indicator in cleaned
-            for indicator in ("document", "chunk", "entity", "survey", "persona",
-                              "summary", "topic", "ingested", "found", "result")
+    # Must be short and contain affirmation language
+    if len(cleaned) > 300:
+        return False
+    if not any(phrase in cleaned for phrase in _AFFIRMATION_PHRASES):
+        return False
+    # Check for actual data content — concrete values, not just keywords
+    # that might appear in the affirmation itself
+    has_concrete_data = (
+        # Contains numbers (chunk counts, entity counts, IDs)
+        any(c.isdigit() for c in cleaned)
+        # Contains bullet points or lists
+        or "\n-" in cleaned or "\n*" in cleaned or "1." in cleaned
+        # Contains quoted text or citations
+        or '"' in cleaned or "[c" in cleaned
+        # Contains a UUID-like pattern
+        or len(cleaned) > 100 and "-" in cleaned and any(
+            len(part) >= 8 and all(c in "0123456789abcdef-" for c in part)
+            for part in cleaned.split()
         )
-        return not has_data
-    return False
+    )
+    return not has_concrete_data
 
 
 def _synthesize_from_results(

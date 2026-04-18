@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.agents.service_agent import run_service_agent
+from app.agents.service_agent import run_service_agent, stream_service_agent
 from app.agents.persona_agent import run_persona_agent
 from app.agents.enrichment_agent import run_enrichment_agent
 from app.models.base import StatusResponse, TenantScopedRequest
@@ -79,6 +79,30 @@ def agent_query(req: AgentQueryRequest) -> AgentQueryResponse:
         sources=result.get("sources", []),
         confidence=result.get("confidence"),
     )
+
+
+@agent_router.post("/stream")
+async def agent_stream(req: AgentQueryRequest):
+    """Stream agent responses via Server-Sent Events.
+
+    Returns a text/event-stream with events:
+      status  — progress updates
+      partial — response content chunks
+      done    — final result with intent, output, sources, confidence
+      error   — error details
+    """
+    from sse_starlette.sse import EventSourceResponse
+
+    async def event_generator():
+        async for event in stream_service_agent(
+            request=req.input,
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            client_profile=req.client_profile,
+        ):
+            yield {"data": json.dumps(event, default=str)}
+
+    return EventSourceResponse(event_generator())
 
 
 # ── Persona ──────────────────────────────────────────────────────────────────

@@ -20,10 +20,11 @@ Usage
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from langchain_core.output_parsers import StrOutputParser
 
@@ -95,6 +96,98 @@ def run_service_agent(
             result["output"] += f"\n\nNote: some aspects may be incomplete — {gaps_text}"
 
     return result
+
+
+# ── Streaming entry point ─────────────────────────────────────────────────
+
+
+async def stream_service_agent(
+    request: str,
+    tenant_id: str,
+    client_id: str,
+    client_profile: Optional[Dict[str, Any]] = None,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Streaming version of run_service_agent. Yields SSE events.
+
+    Event types:
+      status  — progress update (e.g., "Planning...", "Searching knowledge base...")
+      partial — content chunk from the response
+      done    — final result with intent, output, sources, confidence
+      error   — something went wrong
+    """
+    try:
+        # ── Phase 0: Conversation fast path ────────────────────────────
+        if _is_likely_conversation(request):
+            result = _handle_conversation(request)
+            yield {"type": "done", **result}
+            return
+
+        # ── Phase 1: Plan ──────────────────────────────────────────────
+        yield {"type": "status", "message": "Planning..."}
+        plan = await asyncio.to_thread(_plan, request)
+
+        if plan.get("is_conversation"):
+            result = _handle_conversation(request)
+            yield {"type": "done", **result}
+            return
+
+        if plan.get("needs_clarification"):
+            yield {"type": "done",
+                   "intent": "clarification",
+                   "output": plan.get("clarification_message", "Could you clarify your request?"),
+                   "sources": [],
+                   "confidence": plan.get("confidence", 0.0)}
+            return
+
+        # ── Phase 2: Execute ───────────────────────────────────────────
+        steps = plan.get("steps", [])
+        tool_names = [s.get("tool", "") for s in steps]
+        status_msg = _tool_status_message(tool_names)
+        yield {"type": "status", "message": status_msg}
+
+        result = await asyncio.to_thread(
+            _execute, request, plan, tenant_id, client_id, client_profile,
+        )
+
+        # Stream the output
+        if result.get("output"):
+            yield {"type": "partial", "text": result["output"]}
+
+        # ── Phase 3: Reflect (multi-step only) ─────────────────────────
+        if len(steps) >= 2 and result.get("output"):
+            yield {"type": "status", "message": "Reviewing response..."}
+            reflection = await asyncio.to_thread(
+                _reflect, request, result["output"],
+            )
+            if reflection.get("quality") == "poor" and reflection.get("gaps"):
+                gaps_text = "; ".join(reflection["gaps"])
+                result["output"] += f"\n\nNote: some aspects may be incomplete — {gaps_text}"
+
+        yield {"type": "done", **result}
+
+    except Exception as e:
+        logger.exception("stream_service_agent failed")
+        yield {"type": "error", "message": str(e)}
+
+
+def _tool_status_message(tool_names: List[str]) -> str:
+    """Generate a human-friendly status message from planned tool names."""
+    messages = {
+        "ask_question": "Searching the knowledge base...",
+        "generate_survey": "Generating your survey...",
+        "find_personas": "Discovering audience personas...",
+        "enrich_kb": "Analyzing knowledge base gaps...",
+        "ingest_url": "Ingesting URL into the knowledge base...",
+        "build_context": "Building context summary...",
+        "list_documents": "Fetching your documents...",
+        "flag_document": "Updating document...",
+        "get_summary": "Fetching summary...",
+        "search_kb": "Searching the knowledge base...",
+        "check_status": "Checking knowledge base status...",
+    }
+    if tool_names:
+        return messages.get(tool_names[0], "Working on it...")
+    return "Working on it..."
 
 
 # ── Conversation fast path ─────────────────────────────────────────────────

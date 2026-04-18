@@ -2,9 +2,10 @@
 Service agent — plan-execute-reflect chat agent.
 
 Replaces the rigid router agent with a three-phase flow:
-  1. Plan:    LLM analyzes the request, produces a structured tool execution plan
-  2. Execute: ReAct agent follows the plan, adapting if steps fail
-  3. Reflect: Optional quality check on multi-step results
+  0. Fast path: casual conversation handled by lightweight LLM (no tools)
+  1. Plan:      LLM analyzes the request, produces a structured tool execution plan
+  2. Execute:   ReAct agent follows the plan, adapting if steps fail
+  3. Reflect:   Optional quality check on multi-step results
 
 Usage
 -----
@@ -27,7 +28,12 @@ from typing import Any, Dict, List, Optional
 from langchain_core.output_parsers import StrOutputParser
 
 from app.llm_config import get_llm
-from app.prompts.service_prompts import EXECUTE_PROMPT, PLAN_PROMPT, REFLECT_PROMPT
+from app.prompts.service_prompts import (
+    CONVERSATION_PROMPT,
+    EXECUTE_PROMPT,
+    PLAN_PROMPT,
+    REFLECT_PROMPT,
+)
 from app.tools.service_tools import create_service_tools
 
 logger = logging.getLogger(__name__)
@@ -57,8 +63,16 @@ def run_service_agent(
 
     Compatible with the existing AgentQueryResponse contract.
     """
+    # ── Phase 0: Quick conversation check ──────────────────────────────
+    if _is_likely_conversation(request):
+        return _handle_conversation(request)
+
     # ── Phase 1: Plan ──────────────────────────────────────────────────
     plan = _plan(request)
+
+    # Plan detected conversation
+    if plan.get("is_conversation"):
+        return _handle_conversation(request)
 
     if plan.get("needs_clarification"):
         return {
@@ -82,6 +96,52 @@ def run_service_agent(
     return result
 
 
+# ── Conversation fast path ─────────────────────────────────────────────────
+
+_CONVERSATION_PATTERNS = {
+    "hi", "hello", "hey", "hewwo", "yo", "sup", "hiya", "howdy",
+    "thanks", "thank you", "thx", "ty",
+    "bye", "goodbye", "see ya", "cya",
+    "ok", "okay", "cool", "nice", "great",
+    "lol", "haha", "hehe",
+    "help", "what can you do", "who are you",
+}
+
+
+def _is_likely_conversation(request: str) -> bool:
+    """Fast keyword check to skip the planner for obvious chitchat."""
+    cleaned = request.strip().lower().rstrip("!?.,:;")
+    # Exact match on short messages
+    if cleaned in _CONVERSATION_PATTERNS:
+        return True
+    # Very short messages (< 4 words) that aren't questions about data
+    words = cleaned.split()
+    if len(words) <= 3 and not any(
+        kw in cleaned for kw in ("survey", "persona", "ingest", "document", "search", "enrich", "summary")
+    ):
+        return True
+    return False
+
+
+def _handle_conversation(request: str) -> Dict[str, Any]:
+    """Respond to casual messages with a lightweight LLM call."""
+    llm = get_llm("default")
+    chain = CONVERSATION_PROMPT | llm | StrOutputParser()
+
+    try:
+        output = chain.invoke({"request": request})
+    except Exception as e:
+        logger.warning("Conversation response failed: %s", e)
+        output = "Hey there! How can I help you today?"
+
+    return {
+        "intent": "conversation",
+        "output": output,
+        "sources": [],
+        "confidence": 1.0,
+    }
+
+
 # ── Plan ───────────────────────────────────────────────────────────────────
 
 
@@ -93,7 +153,7 @@ def _plan(request: str) -> Dict[str, Any]:
     try:
         raw = chain.invoke({"request": request})
         plan = _parse_json(raw)
-        if plan and "steps" in plan:
+        if plan and ("steps" in plan or plan.get("is_conversation")):
             return plan
     except Exception as e:
         logger.warning("Plan generation failed: %s", e)
@@ -108,6 +168,7 @@ def _plan(request: str) -> Dict[str, Any]:
 
     return {
         "reasoning": "Fallback: could not parse plan from LLM",
+        "is_conversation": False,
         "steps": [{"tool": fallback_tool, "args": fallback_args, "purpose": "fallback"}],
         "confidence": 0.5,
         "needs_clarification": False,
@@ -154,7 +215,7 @@ def _execute(
         logger.exception("Service agent execution failed")
         return {
             "intent": _intent_from_plan(plan),
-            "output": f"Execution failed: {e}",
+            "output": f"I ran into an issue processing your request — {e}. Could you try again?",
             "sources": [],
             "confidence": plan.get("confidence", 0.0),
         }

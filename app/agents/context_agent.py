@@ -36,6 +36,8 @@ def run_context_agent(
     client_profile: Optional[Dict[str, Any]] = None,
     force_regenerate: bool = False,
     new_chunks: Optional[list] = None,
+    granularity_level: str = "tenant",
+    scope_ref: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate or retrieve a context summary for a tenant+client.
 
@@ -43,6 +45,10 @@ def run_context_agent(
         new_chunks: Optional list of chunk dicts from a just-completed ingest.
             These are included alongside KB search results so the summary
             accounts for newly ingested content that may not be indexed yet.
+        granularity_level: Summary granularity — 'tenant' (default),
+            'document', or 'topic'.
+        scope_ref: Required when granularity_level is 'document' (the
+            document_id) or 'topic' (the topic label).
 
     Returns dict with keys: summary, topics, regenerated, context_sampled, status, error.
     """
@@ -54,6 +60,8 @@ def run_context_agent(
         "client_profile": client_profile or {},
         "force_regenerate": force_regenerate,
         "new_chunks": new_chunks or [],
+        "granularity_level": granularity_level,
+        "scope_ref": scope_ref,
     })
 
     summary_data = result.get("generated_summary", {})

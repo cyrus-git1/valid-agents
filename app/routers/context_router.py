@@ -1,26 +1,24 @@
 """
 /context router
 ---------------
-POST   /context/build                          -- Full pipeline: ingest all sources + build KG
-GET    /context/status/{job_id}                -- Poll context build job status
-POST   /context/summary/generate               -- Generate (or regenerate) a context summary
-POST   /context/summary/get                    -- Retrieve an existing summary
+POST   /context/build                            -- Synchronous ingest + summary generation
+POST   /context/summary/generate                 -- Generate (or regenerate) a context summary
+POST   /context/summary/get                      -- Retrieve an existing summary
 DELETE /context/summary/{tenant_id}/{client_id} -- Delete a summary
 """
 from __future__ import annotations
 
 import json
 import logging
-import uuid
+from pathlib import Path
 from typing import Any, Dict
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 
 from app.models.api.context import (
     ContextBuildRequest,
     ContextBuildResponse,
-    ContextBuildStatusResponse,
 )
 from app.models.api.context_summary import (
     ContextSummaryGenerateRequest,
@@ -29,12 +27,12 @@ from app.models.api.context_summary import (
     ContextSummaryResponse,
     ContextSummaryDeleteResponse,
 )
-from app.workflows.context_build_workflow import build_context_graph
+from app.agents.context_agent import run_context_agent
+from app.models.ingest import IngestInput
+from app.services.ingest import IngestService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/context", tags=["context"])
-
-_jobs: Dict[str, Dict[str, Any]] = {}
 
 
 def _ensure_parsed(value: Any, fallback: Any = None) -> Any:
@@ -60,55 +58,112 @@ def _row_to_response(row: Dict[str, Any]) -> ContextSummaryResponse:
     )
 
 
-def _run_context_build(job_id: str, req: ContextBuildRequest) -> None:
-    _jobs[job_id] = {"status": "running"}
+@router.post("/build", response_model=ContextBuildResponse)
+def build_context(req: ContextBuildRequest) -> ContextBuildResponse:
+    """Synchronously ingest sources and regenerate the context summary.
+
+    Stateless by design: no background task state, no in-process job store.
+    """
+    svc = IngestService()
+    warnings: list[str] = []
+    documents_ingested = 0
+    weblinks_ingested = 0
+    transcripts_ingested = 0
+    total_chunks = 0
+
+    # File documents
+    for doc_path in req.context.docs:
+        path = Path(doc_path)
+        if not path.exists():
+            warnings.append(f"File not found: {doc_path}")
+            continue
+        if path.suffix.lower() not in (".pdf", ".docx"):
+            warnings.append(f"Skipping unsupported file type: {doc_path}")
+            continue
+        try:
+            result = svc.ingest(IngestInput(
+                tenant_id=req.tenant_id,
+                client_id=req.client_id,
+                file_bytes=path.read_bytes(),
+                file_name=path.name,
+                title=path.stem,
+                skip_context_generation=True,
+            ))
+            documents_ingested += 1
+            total_chunks += result.chunks_upserted
+            warnings.extend(result.warnings)
+        except Exception as e:
+            logger.exception("Context build ingest failed for %s", doc_path)
+            warnings.append(f"Failed to ingest {doc_path}: {e}")
+
+    # Transcript files
+    for transcript_path in req.context.transcripts:
+        path = Path(transcript_path)
+        if not path.exists():
+            warnings.append(f"Transcript not found: {transcript_path}")
+            continue
+        if path.suffix.lower() != ".vtt":
+            warnings.append(f"Skipping non-VTT transcript: {transcript_path}")
+            continue
+        try:
+            result = svc.ingest(IngestInput(
+                tenant_id=req.tenant_id,
+                client_id=req.client_id,
+                file_bytes=path.read_bytes(),
+                file_name=path.name,
+                title=path.stem,
+                skip_context_generation=True,
+            ))
+            transcripts_ingested += 1
+            total_chunks += result.chunks_upserted
+            warnings.extend(result.warnings)
+        except Exception as e:
+            logger.exception("Context build transcript ingest failed for %s", transcript_path)
+            warnings.append(f"Failed to ingest transcript {transcript_path}: {e}")
+
+    # Web links
+    for url in req.context.weblinks:
+        try:
+            result = svc.ingest(IngestInput(
+                tenant_id=req.tenant_id,
+                client_id=req.client_id,
+                web_url=url,
+                skip_context_generation=True,
+            ))
+            weblinks_ingested += 1
+            total_chunks += result.chunks_upserted
+            warnings.extend(result.warnings)
+        except Exception as e:
+            logger.exception("Context build web ingest failed for %s", url)
+            warnings.append(f"Failed to ingest {url}: {e}")
+
+    if documents_ingested == 0 and weblinks_ingested == 0 and transcripts_ingested == 0:
+        raise HTTPException(status_code=400, detail="No valid sources were ingested.")
+
     try:
-        app = build_context_graph()
-        result = app.invoke({
-            "tenant_id": str(req.tenant_id),
-            "client_id": str(req.client_id),
-            "docs": req.context.docs,
-            "weblinks": req.context.weblinks,
-            "transcripts": req.context.transcripts,
-            "client_profile": req.client_profile.model_dump(),
-        })
-
-        ingest_results = result.get("ingest_results", [])
-        kg_result = result.get("kg_build_result", {})
-
-        doc_count = sum(1 for r in ingest_results if r.get("source_type") not in ("web", "vtt"))
-        web_count = sum(1 for r in ingest_results if r.get("source_type") == "web")
-        vtt_count = sum(1 for r in ingest_results if r.get("source_type") == "vtt")
-        total_chunks = sum(r.get("chunks_upserted", 0) for r in ingest_results)
-
-        _jobs[job_id] = {
-            "status": result.get("status", "complete"),
-            "documents_ingested": doc_count,
-            "weblinks_ingested": web_count,
-            "transcripts_ingested": vtt_count,
-            "total_chunks": total_chunks,
-            "kg_nodes_upserted": kg_result.get("nodes_upserted", 0),
-            "kg_edges_upserted": kg_result.get("edges_upserted", 0),
-            "warnings": result.get("warnings", []),
-        }
+        summary_result = run_context_agent(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            client_profile=req.client_profile.model_dump(),
+            force_regenerate=True,
+        )
+        if summary_result.get("status") in ("generation_failed", "store_failed"):
+            warnings.append(summary_result.get("error", "Context generation failed"))
     except Exception as e:
-        logger.exception("Context build job %s failed", job_id)
-        _jobs[job_id] = {"status": "failed", "detail": str(e)}
+        logger.exception("Context summary generation failed after build")
+        warnings.append(f"Context summary generation failed: {e}")
 
-
-@router.post("/build", response_model=ContextBuildResponse, status_code=202)
-def build_context(req: ContextBuildRequest, background_tasks: BackgroundTasks) -> ContextBuildResponse:
-    job_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_context_build, job_id, req)
-    return ContextBuildResponse(job_id=job_id, status="accepted")
-
-
-@router.get("/status/{job_id}", response_model=ContextBuildStatusResponse)
-def context_status(job_id: str) -> ContextBuildStatusResponse:
-    job = _jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-    return ContextBuildStatusResponse(job_id=job_id, status=job.get("status", "unknown"), detail=job)
+    return ContextBuildResponse(
+        job_id=None,
+        status="complete",
+        documents_ingested=documents_ingested,
+        weblinks_ingested=weblinks_ingested,
+        transcripts_ingested=transcripts_ingested,
+        total_chunks=total_chunks,
+        kg_nodes_upserted=0,
+        kg_edges_upserted=0,
+        warnings=warnings,
+    )
 
 
 @router.post("/summary/generate", response_model=ContextSummaryGenerateResponse)

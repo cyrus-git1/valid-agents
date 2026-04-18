@@ -40,6 +40,7 @@ from app.llm_config import get_llm
 from app.agents.survey_agent import run_survey_agent
 from app.agents.persona_agent import run_persona_agent
 from app.agents.enrichment_agent import run_enrichment_agent
+from app.agents.insights_agent import run_insights_agent
 from app.prompts.router_prompts import (
     INTENT_CLASSIFICATION_PROMPT,
     INTENT_CLASSIFICATION_RETRY_PROMPT,
@@ -97,7 +98,7 @@ def classify_intent(state: RouterState) -> RouterState:
         confidence = 0.0
 
     # Normalize
-    if intent not in ("survey", "persona", "enrich", "ingest", "unknown"):
+    if intent not in ("survey", "persona", "enrich", "ingest", "insights", "unknown"):
         intent = "unknown"  # default to unknown (retrieval removed — use search endpoint)
 
     logger.info(
@@ -123,12 +124,13 @@ def handle_retrieval(state: RouterState) -> RouterState:
     return {
         **state,
         "output": (
-            "For knowledge base search and question answering, use the /search/ask endpoint "
-            "on the core API. I can help you with:\n"
+            "For knowledge base search and question answering, use the "
+            "/insights/analyze endpoint for evidence-backed answers, or the "
+            "/search/ask endpoint on the core API. I can help you with:\n"
+            "- Generating evidence-backed insights and analysis\n"
             "- Generating surveys based on your content\n"
             "- Discovering audience personas\n"
-            "- Enriching your knowledge base with web content\n"
-            "- Generating business insights reports\n\n"
+            "- Enriching your knowledge base with web content\n\n"
             "Please rephrase your request or use the appropriate endpoint."
         ),
     }
@@ -206,13 +208,47 @@ def handle_enrich(state: RouterState) -> RouterState:
         return {**state, "output": f"Enrichment failed: {e}", "error": str(e)}
 
 
+def handle_insights(state: RouterState) -> RouterState:
+    """Delegate to the business insights agent."""
+    try:
+        result = run_insights_agent(
+            tenant_id=state["tenant_id"],
+            client_id=state["client_id"],
+            client_profile=state.get("client_profile"),
+            focus_query=state["input"],
+        )
+        summary = result.get("executive_summary", "")
+        findings = result.get("key_findings", [])
+        if not summary and not findings:
+            output = "I couldn't generate meaningful insights from the available data."
+        else:
+            lines = []
+            if summary:
+                lines.append(f"**Executive Summary**\n{summary}\n")
+            if findings:
+                lines.append("**Key Findings**")
+                for f in findings[:5]:
+                    lines.append(f"- {f.get('finding', '')}")
+                lines.append("")
+            recs = result.get("recommendations", [])
+            if recs:
+                lines.append("**Recommendations**")
+                for r in recs[:3]:
+                    lines.append(f"- {r.get('recommendation', '')}")
+            output = "\n".join(lines)
+        return {**state, "output": output, "sources": []}
+    except Exception as e:
+        logger.exception("Insights agent failed")
+        return {**state, "output": f"Insights generation failed: {e}", "error": str(e)}
+
+
 def handle_ingest(state: RouterState) -> RouterState:
     """For ingest intents, direct to the /ingest or /context endpoints."""
     return {
         **state,
         "output": (
             "To ingest new content, use the /ingest/file or /ingest/web endpoints, "
-            "or the /context/build endpoint for a full pipeline run. "
+            "or the synchronous /context/build endpoint for ingest plus summary generation. "
             "I can help you search and generate surveys from existing content."
         ),
     }
@@ -224,9 +260,10 @@ def handle_unknown(state: RouterState) -> RouterState:
         **state,
         "output": (
             "I'm not sure what you're asking. I can:\n"
-            "- Search your knowledge base and answer questions\n"
+            "- Generate evidence-backed insights from your knowledge base\n"
             "- Generate surveys based on your content\n"
-            "- Help you understand your ingested documents\n\n"
+            "- Discover audience personas\n"
+            "- Enrich your knowledge base with web content\n\n"
             "Please rephrase your request."
         ),
     }
@@ -238,9 +275,10 @@ def handle_clarification(state: RouterState) -> RouterState:
         **state,
         "output": (
             "I'm not quite sure what you're looking for. Could you clarify? I can:\n"
-            "- Search your knowledge base and answer questions\n"
+            "- Generate evidence-backed insights from your knowledge base\n"
             "- Generate surveys based on your content\n"
-            "- Help you understand your ingested documents\n\n"
+            "- Discover audience personas\n"
+            "- Enrich your knowledge base with web content\n\n"
             f"(I classified your request as '{state.get('intent', 'unknown')}' "
             f"with {state.get('intent_confidence', 0.0):.0%} confidence)"
         ),
@@ -257,6 +295,7 @@ def route_by_intent(state: RouterState) -> str:
         "survey": "handle_survey",
         "persona": "handle_persona",
         "enrich": "handle_enrich",
+        "insights": "handle_insights",
         "ingest": "handle_ingest",
         "unknown": "handle_unknown",
     }.get(intent, "handle_unknown")
@@ -286,6 +325,7 @@ def build_router_agent():
     graph.add_node("handle_survey", handle_survey)
     graph.add_node("handle_persona", handle_persona)
     graph.add_node("handle_enrich", handle_enrich)
+    graph.add_node("handle_insights", handle_insights)
     graph.add_node("handle_ingest", handle_ingest)
     graph.add_node("handle_unknown", handle_unknown)
     graph.add_node("handle_clarification", handle_clarification)
@@ -298,6 +338,7 @@ def build_router_agent():
     graph.add_edge("handle_survey", END)
     graph.add_edge("handle_persona", END)
     graph.add_edge("handle_enrich", END)
+    graph.add_edge("handle_insights", END)
     graph.add_edge("handle_ingest", END)
     graph.add_edge("handle_unknown", END)
     graph.add_edge("handle_clarification", END)

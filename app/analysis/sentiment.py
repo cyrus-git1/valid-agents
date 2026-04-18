@@ -22,7 +22,7 @@ from supabase import Client
 from app.prompts.sentiment_prompts import SENTIMENT_ANALYSIS_PROMPT
 from app.llm_config import LLMConfig
 from app.analysis.base import BaseAnalysisService
-from app import core_client as _ctx  # replaces ContextSummaryService
+from app import core_client as _ctx
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +57,10 @@ class SentimentAnalysisService(BaseAnalysisService):
         chunks = self._get_transcript_chunks(tenant_id, client_id, limit=chunk_limit)
         transcript_context = self._build_transcript_context(chunks)
 
-        # Fetch existing context summary if available
-        summary_svc = ContextSummaryService(self.sb)
-        existing = summary_svc.get_summary(tenant_id=tenant_id, client_id=client_id)
+        existing = _ctx.get_context_summary(
+            tenant_id=str(tenant_id),
+            client_id=str(client_id),
+        )
         if existing:
             context_summary = (
                 f"Summary: {existing.get('summary', 'N/A')}\n"

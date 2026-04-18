@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.agents.router_agent import build_router_agent
+from app.agents.service_agent import run_service_agent
 from app.agents.persona_agent import run_persona_agent
 from app.agents.enrichment_agent import run_enrichment_agent
 from app.models.base import StatusResponse, TenantScopedRequest
@@ -64,13 +64,12 @@ class AgentQueryResponse(BaseModel):
 @agent_router.post("/query", response_model=AgentQueryResponse)
 def agent_query(req: AgentQueryRequest) -> AgentQueryResponse:
     try:
-        agent = build_router_agent()
-        result = agent.invoke({
-            "input": req.input,
-            "tenant_id": str(req.tenant_id),
-            "client_id": str(req.client_id),
-            "client_profile": req.client_profile,
-        })
+        result = run_service_agent(
+            request=req.input,
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            client_profile=req.client_profile,
+        )
     except Exception as e:
         logger.exception("Agent query failed")
         raise HTTPException(status_code=500, detail=f"Agent query failed: {e}")
@@ -78,7 +77,7 @@ def agent_query(req: AgentQueryRequest) -> AgentQueryResponse:
         intent=result.get("intent", "unknown"),
         output=result.get("output", ""),
         sources=result.get("sources", []),
-        confidence=result.get("intent_confidence"),
+        confidence=result.get("confidence"),
     )
 
 

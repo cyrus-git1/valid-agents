@@ -29,28 +29,53 @@ def create_insights_tools(
 
     @tool
     def check_context() -> Optional[Dict[str, Any]]:
-        """Check if a context summary exists for this tenant.
+        """Check what context summaries exist for this tenant.
 
-        Returns {summary, topics} or None. Always call this first.
+        Returns the tenant-wide summary plus counts of document-level and
+        topic-level summaries. Always call this first to understand the
+        breadth of available context at all granularity levels.
         """
+        result: Dict[str, Any] = {}
         try:
-            return core_client.get_context_summary(
+            tenant_summary = core_client.get_context_summary(
                 tenant_id=tenant_id, client_id=client_id,
             )
+            if tenant_summary:
+                result["summary"] = tenant_summary.get("summary", "")
+                result["topics"] = tenant_summary.get("topics", [])
         except Exception as e:
-            logger.warning("check_context failed: %s", e)
-            return None
+            logger.warning("check_context (tenant) failed: %s", e)
+
+        try:
+            all_summaries = core_client.list_summaries(
+                tenant_id=tenant_id, client_id=client_id,
+            )
+            summaries_list = all_summaries.get("summaries", [])
+            doc_sums = [s for s in summaries_list if s.get("source_type") == "DocumentSummary"]
+            topic_sums = [s for s in summaries_list if s.get("source_type") == "TopicSummary"]
+            result["document_summary_count"] = len(doc_sums)
+            result["topic_summary_count"] = len(topic_sums)
+            if doc_sums:
+                result["document_summaries"] = doc_sums[:5]
+            if topic_sums:
+                result["topic_summaries"] = topic_sums[:5]
+        except Exception as e:
+            logger.warning("check_context (list_summaries) failed: %s", e)
+
+        return result if result else None
 
     @tool
     def check_available_data() -> Dict[str, Any]:
         """Check what data sources exist for this tenant.
 
-        Returns counts of transcripts, survey outputs, and documents.
+        Returns counts of transcripts, survey outputs, documents, and
+        summaries at each granularity level (tenant, document, topic).
         Use this to decide which analyses to run.
         """
         transcript_count = 0
         survey_count = 0
         document_count = 0
+        summary_counts: Dict[str, int] = {}
 
         try:
             transcript_count = core_client.count_transcripts(
@@ -71,8 +96,19 @@ def create_insights_tools(
             docs = core_client.search_graph(
                 tenant_id=tenant_id, client_id=client_id,
                 query="all content", top_k=1, hop_limit=0,
+                exclude_status=["archived", "deprecated"],
             )
             document_count = len(docs)
+        except Exception:
+            pass
+
+        try:
+            all_summaries = core_client.list_summaries(
+                tenant_id=tenant_id, client_id=client_id,
+            )
+            for s in all_summaries.get("summaries", []):
+                st = s.get("source_type", "unknown")
+                summary_counts[st] = summary_counts.get(st, 0) + 1
         except Exception:
             pass
 
@@ -80,6 +116,7 @@ def create_insights_tools(
             "transcript_count": transcript_count,
             "survey_count": survey_count,
             "has_documents": document_count > 0,
+            "summary_counts": summary_counts,
         }
 
     _persona_cache: list = []
@@ -133,6 +170,8 @@ def create_insights_tools(
                     tenant_id=tenant_id, client_id=client_id,
                     query=q, top_k=10, hop_limit=1,
                     node_types=["VideoTranscript", "Chunk"],
+                    boost_pinned=True,
+                    exclude_status=["archived", "deprecated"],
                 )
                 for d in docs:
                     all_content.append(d.page_content)
@@ -179,6 +218,8 @@ def create_insights_tools(
                 query="actionable insights pain points feature requests improvements",
                 top_k=15, hop_limit=1,
                 node_types=["VideoTranscript", "Chunk"],
+                boost_pinned=True,
+                exclude_status=["archived", "deprecated"],
             )
         except Exception:
             docs = []
@@ -251,11 +292,26 @@ def create_insights_tools(
     def run_strategic_analysis() -> Dict[str, Any]:
         """Run strategic analysis across all available data sources.
 
-        Searches KB for strategic themes, combines with context summary.
+        Searches KB for strategic themes using hybrid ranking, combines
+        with all available summaries (tenant, document, and topic level).
         """
         context = core_client.get_context_summary(
             tenant_id=tenant_id, client_id=client_id,
         )
+
+        # Gather document-level and topic-level summaries for richer context
+        extra_summary_parts: List[str] = []
+        try:
+            all_summaries = core_client.list_summaries(
+                tenant_id=tenant_id, client_id=client_id,
+            )
+            for s in all_summaries.get("summaries", []):
+                st = s.get("source_type", "")
+                if st in ("DocumentSummary", "TopicSummary") and s.get("summary"):
+                    label = s.get("topic") or s.get("document_id") or st
+                    extra_summary_parts.append(f"[{st}: {label}] {s['summary'][:300]}")
+        except Exception:
+            pass
 
         strategic_queries = [
             "strategy goals challenges opportunities market position",
@@ -269,12 +325,15 @@ def create_insights_tools(
                 docs = core_client.search_graph(
                     tenant_id=tenant_id, client_id=client_id,
                     query=q, top_k=10, hop_limit=1,
+                    boost_pinned=True,
+                    exclude_status=["archived", "deprecated"],
+                    recency_weight=0.2,
                 )
                 all_docs.extend(docs)
             except Exception:
                 pass
 
-        if not context and not all_docs:
+        if not context and not all_docs and not extra_summary_parts:
             return {"error": "No data available", "executive_summary": "", "action_points": []}
 
         kb_context = "\n\n---\n\n".join(
@@ -282,6 +341,8 @@ def create_insights_tools(
         ) if all_docs else "(No KB content)"
 
         summary_text = context.get("summary", "") if context else ""
+        if extra_summary_parts:
+            summary_text += "\n\n" + "\n".join(extra_summary_parts)
         topics = context.get("topics", []) if context else []
 
         from app.prompts.strategic_analysis_prompts import STRATEGIC_ANALYSIS_PROMPT

@@ -42,7 +42,6 @@ ROUTE_LIMITS: dict[str, int] = {
     "/ingest/file": 10,
     "/ingest/web": 10,
     "/ingest/batch": 5,
-    "/search/ask": 30,
 }
 
 DEFAULT_LIMIT = int(os.environ.get("RATE_LIMIT_DEFAULT", "60"))

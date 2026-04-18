@@ -33,25 +33,15 @@ class RAGState(TypedDict, total=False):
     model: str
 
 
-class ContextBuildState(TypedDict, total=False):
-    tenant_id: str
-    client_id: str
-    docs: List[str]
-    weblinks: List[str]
-    transcripts: List[str]
-    client_profile: Dict[str, Any]
-    ingest_results: List[Dict[str, Any]]
-    documents: List[Document]
-    status: str
-    error: Optional[str]
-    warnings: List[str]
-
-
 class ContextState(TypedDict, total=False):
     tenant_id: str
     client_id: str
     client_profile: Dict[str, Any]
     force_regenerate: bool
+    # Granularity: 'tenant' (default), 'document', or 'topic'. scope_ref is the
+    # document_id for 'document' or the topic label for 'topic'.
+    granularity_level: str
+    scope_ref: Optional[str]
     new_chunks: List[Dict[str, Any]]  # chunks from just-completed ingest (not yet indexed)
     # Step outputs
     existing_summary: Optional[Dict[str, Any]]

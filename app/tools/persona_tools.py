@@ -36,6 +36,9 @@ def create_persona_tools(tenant_id: str, client_id: str) -> list:
         """Search the knowledge base for audience and persona evidence.
 
         Returns content chunks with similarity scores and document IDs.
+        Uses hybrid ranking: boosts pinned/canonical documents and excludes
+        archived content for higher-quality persona evidence.
+
         Use diverse queries to find different audience segments:
         - Customer demographics and segments
         - Pain points and challenges
@@ -49,6 +52,8 @@ def create_persona_tools(tenant_id: str, client_id: str) -> list:
                 query=query,
                 top_k=top_k,
                 hop_limit=1,
+                boost_pinned=True,
+                exclude_status=["archived", "deprecated"],
             )
         except Exception as e:
             logger.warning("persona search_kb failed: %s", e)
@@ -66,19 +71,39 @@ def create_persona_tools(tenant_id: str, client_id: str) -> list:
 
     @tool
     def get_summary() -> Optional[Dict[str, Any]]:
-        """Fetch the existing context summary for this tenant.
+        """Fetch all available context summaries for this tenant.
 
-        Returns a dict with 'summary' and 'topics', or None if no summary exists.
-        Check this first to understand what the KB covers before searching.
+        Returns the tenant-wide summary plus any document-level or topic-level
+        summaries that exist. Check this first to understand what the KB covers
+        before searching.
         """
+        result: Dict[str, Any] = {}
         try:
-            return core_client.get_context_summary(
+            tenant_summary = core_client.get_context_summary(
                 tenant_id=tenant_id,
                 client_id=client_id,
             )
+            if tenant_summary:
+                result["summary"] = tenant_summary.get("summary", "")
+                result["topics"] = tenant_summary.get("topics", [])
         except Exception as e:
-            logger.warning("persona get_summary failed: %s", e)
-            return None
+            logger.warning("persona get_summary (tenant) failed: %s", e)
+
+        try:
+            all_summaries = core_client.list_summaries(
+                tenant_id=tenant_id,
+                client_id=client_id,
+            )
+            doc_summaries = [
+                s for s in all_summaries.get("summaries", [])
+                if s.get("source_type") in ("DocumentSummary", "TopicSummary")
+            ]
+            if doc_summaries:
+                result["additional_summaries"] = doc_summaries
+        except Exception as e:
+            logger.warning("persona get_summary (list) failed: %s", e)
+
+        return result if result else None
 
     @tool
     def count_transcripts() -> int:

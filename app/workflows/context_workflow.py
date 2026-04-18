@@ -22,8 +22,11 @@ from app.models.states import ContextState
 from app.prompts.context_prompts import CONTEXT_GENERATION_PROMPT
 from app.harness_pkg import run_with_harness, StepOutput
 from app.harness_pkg.configs import CONTEXT_STEP_CONFIG
+from app import core_client
 from app.tools.context_tools import (
+    get_document_summary,
     get_existing_summary,
+    get_topic_summary,
     search_knowledge_base,
     store_context_summary,
 )
@@ -40,17 +43,41 @@ _COVERAGE_QUERIES = [
 # ── Nodes ───────────────────────────────────────────────────────────────────
 
 
+def _granularity(state: ContextState) -> str:
+    return (state.get("granularity_level") or "tenant").lower()
+
+
 def check_existing(state: ContextState) -> ContextState:
-    """Check if a context summary already exists."""
+    """Check if a summary at the requested granularity already exists."""
     if state.get("force_regenerate"):
         return {**state, "existing_summary": None, "status": "regenerating"}
 
-    result = get_existing_summary.invoke({
-        "tenant_id": state["tenant_id"],
-        "client_id": state["client_id"],
-    })
+    g = _granularity(state)
+    scope_ref = state.get("scope_ref")
+    result: dict | None = None
+    if g == "document" and scope_ref:
+        result = get_document_summary.invoke({
+            "tenant_id": state["tenant_id"],
+            "client_id": state["client_id"],
+            "document_id": scope_ref,
+        })
+    elif g == "topic" and scope_ref:
+        result = get_topic_summary.invoke({
+            "tenant_id": state["tenant_id"],
+            "client_id": state["client_id"],
+            "topic": scope_ref,
+        })
+    else:
+        result = get_existing_summary.invoke({
+            "tenant_id": state["tenant_id"],
+            "client_id": state["client_id"],
+        })
 
     if result and result.get("summary"):
+        # If the stored summary is stale, treat it like missing so we regenerate
+        if result.get("is_stale"):
+            logger.info("check_existing: stale summary (granularity=%s)", g)
+            return {**state, "existing_summary": result, "status": "regenerating"}
         return {
             **state,
             "existing_summary": result,
@@ -62,22 +89,61 @@ def check_existing(state: ContextState) -> ContextState:
 
 
 def retrieve_kg_content(state: ContextState) -> ContextState:
-    """Retrieve KG content with multiple diverse queries + merge new chunks."""
+    """Retrieve KG content scoped to the requested granularity."""
     all_results: Dict[str, Dict[str, Any]] = {}
+    g = _granularity(state)
+    scope_ref = state.get("scope_ref")
 
-    # Search existing KB content
-    for query in _COVERAGE_QUERIES:
+    if g == "document" and scope_ref:
+        # Pull every chunk belonging to this document; no semantic expansion needed.
+        try:
+            docs = core_client.search_graph(
+                tenant_id=state["tenant_id"],
+                client_id=state["client_id"],
+                query=f"document {scope_ref}",
+                top_k=50,
+                hop_limit=0,
+                node_types=["Chunk"],
+                exclude_status=["archived", "deprecated"],
+            )
+            for doc in docs:
+                nid = doc.metadata.get("node_id")
+                if nid and nid not in all_results:
+                    all_results[nid] = {
+                        "content": doc.page_content,
+                        "similarity_score": doc.metadata.get("similarity_score", 0.0),
+                        "node_id": nid,
+                        "document_id": doc.metadata.get("document_id"),
+                    }
+        except Exception as e:
+            logger.warning("document-scoped retrieval failed: %s", e)
+    elif g == "topic" and scope_ref:
+        # Vector search on the topic string + 1-hop expansion for evidence
         results = search_knowledge_base.invoke({
             "tenant_id": state["tenant_id"],
             "client_id": state["client_id"],
-            "query": query,
-            "top_k": 15,
+            "query": scope_ref,
+            "top_k": 20,
             "hop_limit": 1,
         })
         for r in results:
             nid = r.get("node_id")
             if nid and nid not in all_results:
                 all_results[nid] = r
+    else:
+        # Tenant-wide: existing coverage queries
+        for query in _COVERAGE_QUERIES:
+            results = search_knowledge_base.invoke({
+                "tenant_id": state["tenant_id"],
+                "client_id": state["client_id"],
+                "query": query,
+                "top_k": 15,
+                "hop_limit": 1,
+            })
+            for r in results:
+                nid = r.get("node_id")
+                if nid and nid not in all_results:
+                    all_results[nid] = r
 
     # Merge new chunks that may not be indexed yet
     new_chunks = state.get("new_chunks", [])
@@ -235,13 +301,20 @@ def generate_summary(state: ContextState) -> ContextState:
 
 
 def store_summary(state: ContextState) -> ContextState:
-    """Store the validated summary back to the memory layer."""
+    """Store the validated summary back to the memory layer at the requested granularity."""
     summary_data = state.get("generated_summary", {})
     summary = summary_data.get("summary", "")
     topics = summary_data.get("topics", [])
 
     if not summary:
         return {**state, "status": "store_skipped", "error": "No summary to store."}
+
+    # Track which source chunks contributed — enables evidence traceback + staleness diff
+    kg_results = state.get("kg_results", [])
+    source_chunk_ids = [
+        r.get("document_id") for r in kg_results
+        if isinstance(r, dict) and r.get("document_id")
+    ]
 
     result = store_context_summary.invoke({
         "tenant_id": state["tenant_id"],
@@ -250,6 +323,9 @@ def store_summary(state: ContextState) -> ContextState:
         "topics": topics,
         "source_stats": state.get("source_stats", {}),
         "client_profile": state.get("client_profile", {}),
+        "granularity_level": _granularity(state),
+        "scope_ref": state.get("scope_ref"),
+        "source_chunk_ids": source_chunk_ids,
     })
 
     if result.get("status") == "ok":

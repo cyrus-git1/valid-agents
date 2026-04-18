@@ -32,8 +32,9 @@ from app.models.api.panel_participants import (
     PanelFilterResult,
     PanelParticipantResult,
 )
+from app import core_client
+from app.agents.context_agent import run_context_agent
 from app.services.chunking_service import ChunkingService
-from app.services.context_summary_service import ContextSummaryService
 
 logger = logging.getLogger(__name__)
 
@@ -557,10 +558,9 @@ class PanelParticipantService:
             warnings.append("KG build pending — waiting for memory service endpoint.")
 
             try:
-                summary_svc = ContextSummaryService(self._require_supabase())
-                summary_svc.generate_summary(
-                    tenant_id=tenant_id,
-                    client_id=client_id,
+                run_context_agent(
+                    tenant_id=str(tenant_id),
+                    client_id=str(client_id),
                     force_regenerate=True,
                 )
             except Exception as e:
@@ -590,10 +590,9 @@ class PanelParticipantService:
         """
         sb = self._require_supabase()
 
-        # Context summary
-        summary_svc = ContextSummaryService(sb)
-        summary_row = summary_svc.get_summary(
-            tenant_id=tenant_id, client_id=client_id,
+        summary_row = core_client.get_context_summary(
+            tenant_id=str(tenant_id),
+            client_id=str(client_id),
         )
         summary_text = ""
         topics: List[str] = []

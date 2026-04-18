@@ -18,8 +18,8 @@ from app.models.api.admin import (
     ReindexRequest,
     ReindexResponse,
 )
-from app.models.api.ingest import IngestInput
-from app.services.ingest_service import IngestService
+from app.models.ingest import IngestInput
+from app.services.ingest import IngestService
 
 # TODO: KGService has moved to the memory service
 KGService = None

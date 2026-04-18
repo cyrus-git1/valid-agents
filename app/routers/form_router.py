@@ -1,8 +1,8 @@
 """
-/form router — survey targeting, distribution, and auto-fill.
+/form router — survey targeting, distribution, and schema-aware auto-fill.
 
 POST /form/target   — Demographic targeting recommendations
-POST /form/autofill — Auto-fill client_profile from KB context
+POST /form/autofill — Schema-aware auto-fill from KB context
 """
 from __future__ import annotations
 
@@ -286,102 +286,95 @@ def generate_targeting(req: FormTargetRequest) -> FormTargetResponse:
         raise HTTPException(status_code=500, detail=f"Targeting generation failed: {e}")
 
 
-# ── Auto-fill client profile ───────────────────────────────────────────────
+# ── Schema-aware auto-fill ─────────────────────────────────────────────────
+
+
+class SchemaField(BaseModel):
+    """A single field from the frontend form schema."""
+    name: str
+    type: str = Field(description="text, select, multi_select, segmented_control, textarea, checkbox, tag_input, array, file[]")
+    label: str
+    options: Optional[List[str]] = Field(default=None, description="Allowed values for select/multi_select/segmented_control")
+    scope: Optional[str] = Field(default=None, description="shared, b2b, or b2c — controls visibility")
 
 
 class AutofillRequest(TenantScopedRequest):
-    """Request to auto-fill a client profile from KB content."""
-    pass  # just needs tenant_id + client_id
-
-
-class AutofillDemographic(BaseModel):
-    age_range: Optional[str] = None
-    income_bracket: Optional[str] = None
-    occupation: Optional[str] = None
-    location: Optional[str] = None
-    language: Optional[str] = None
+    """Request to auto-fill form fields from KB content."""
+    schema: List[SchemaField] = Field(description="Fields to fill from the KB")
+    business_model: Optional[str] = Field(default=None, description="b2b, b2c, or both — filters scope-specific fields")
 
 
 class AutofillResponse(BaseModel):
-    company_name: Optional[str] = None
-    industry: Optional[str] = None
-    headcount: Optional[str] = None
-    revenue: Optional[str] = None
-    persona: Optional[str] = None
-    products: List[str] = Field(default_factory=list)
-    competitors: List[str] = Field(default_factory=list)
-    target_market: Optional[str] = None
-    demographic: AutofillDemographic = Field(default_factory=AutofillDemographic)
-    confidence: float = Field(default=0.0, description="How much KB evidence supports this profile (0-1)")
+    values: Dict[str, Any] = Field(description="Map of field name → extracted value")
+    confidence: float = Field(default=0.0, description="Overall confidence (0-1)")
     sources_used: int = Field(default=0, description="Number of KB chunks used")
 
 
-AUTOFILL_SYSTEM_PROMPT = (
-    "You are a business analyst. Given knowledge base excerpts about a company, "
-    "extract a structured company profile.\n\n"
-    "Extract as much as you can find evidence for. Leave fields null if "
-    "the KB doesn't contain enough information — do NOT guess or hallucinate.\n\n"
-    "Return JSON:\n"
-    "{\n"
-    '  "company_name": "Acme Corp",\n'
-    '  "industry": "enterprise SaaS",\n'
-    '  "headcount": "50-200",\n'
-    '  "revenue": "Series B / $10M ARR",\n'
-    '  "persona": "SMB founders and product leads",\n'
-    '  "products": ["Product A", "Product B"],\n'
-    '  "competitors": ["Competitor X", "Competitor Y"],\n'
-    '  "target_market": "North American mid-market B2B",\n'
-    '  "demographic": {\n'
-    '    "age_range": "25-45",\n'
-    '    "income_bracket": "middle to upper-middle",\n'
-    '    "occupation": "product managers, founders",\n'
-    '    "location": "urban, US + Canada",\n'
-    '    "language": "en"\n'
-    "  },\n"
-    '  "confidence": 0.8\n'
-    "}\n\n"
-    "Rules:\n"
-    "- Only include information directly supported by the KB excerpts\n"
-    "- For products/competitors, use exact names from the content\n"
-    "- confidence 0.8+ only if multiple excerpts support the profile\n"
-    "- If the KB is sparse, set confidence low and leave fields null"
+_AUTOFILL_SCHEMA_PROMPT = (
+    "You are a business analyst. Given knowledge base excerpts about a company "
+    "and a form schema, extract values for each field.\n\n"
+    "FIELD SCHEMA:\n{field_schema}\n\n"
+    "TYPE RULES:\n"
+    "- select / segmented_control: return EXACTLY one of the provided options (string), or null\n"
+    "- multi_select: return an ARRAY of values from the provided options, or []\n"
+    "- text / textarea: return a string, or null\n"
+    "- checkbox: return true or false\n"
+    "- tag_input: return an array of short strings, or []\n"
+    "- file[] / array / chat: SKIP — return null\n\n"
+    "RULES:\n"
+    "- Only fill fields where KB evidence exists — set to null if unsure\n"
+    "- For fields with options, ONLY return values from the allowed options list\n"
+    "- Do NOT guess, hallucinate, or infer beyond what the excerpts say\n"
+    "- confidence: 0.8+ only if multiple excerpts support the values\n\n"
+    "Return ONLY valid JSON:\n"
+    '{{\n'
+    '  "values": {{"fieldName": "value", "otherField": ["opt1", "opt2"], ...}},\n'
+    '  "confidence": 0.75\n'
+    '}}'
 )
 
 
 @router.post("/autofill", response_model=AutofillResponse)
-def autofill_profile(req: AutofillRequest) -> AutofillResponse:
-    """Auto-fill a client profile from knowledge base content.
+def autofill_form(req: AutofillRequest) -> AutofillResponse:
+    """Auto-fill form fields from knowledge base content.
 
-    Searches the KB for company information, extracts structured profile
-    fields, and returns what it can find with confidence scoring.
+    Accepts a form schema (field names, types, allowed options), searches
+    the KB for relevant evidence, and returns values mapped to each field's
+    type and constraints.
     """
     import re
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
+    # Filter fields by scope
+    fields = _filter_fields_by_scope(req.schema, req.business_model)
+
+    # Skip non-fillable types
+    fillable = [f for f in fields if f.type not in ("file[]", "array", "chat")]
+    if not fillable:
+        return AutofillResponse(values={}, confidence=0.0, sources_used=0)
+
+    # Build field schema text for the prompt
+    field_schema_text = _build_field_schema_text(fillable)
+
     # Fetch context summary
+    context_text = ""
     context = core_client.get_context_summary(
         tenant_id=str(req.tenant_id),
         client_id=str(req.client_id),
     )
-    context_text = ""
     if context:
         context_text = (
             f"Context Summary:\n{context.get('summary', '')}\n"
             f"Topics: {', '.join(context.get('topics', []))}\n\n"
         )
 
-    # Search KB for company info
-    _PROFILE_QUERIES = [
-        "company name industry about us who we are",
-        "products services offerings features platform",
-        "customers target market audience demographic",
-        "competitors market position pricing",
-        "team size employees headcount revenue funding",
-    ]
-    all_excerpts = []
-    seen_ids = set()
-    for q in _PROFILE_QUERIES:
+    # Build KB search queries from field labels
+    queries = _build_search_queries(fillable)
+
+    all_excerpts: List[str] = []
+    seen_ids: set = set()
+    for q in queries:
         try:
             docs = core_client.search_graph(
                 tenant_id=str(req.tenant_id),
@@ -390,6 +383,8 @@ def autofill_profile(req: AutofillRequest) -> AutofillResponse:
                 top_k=5,
                 hop_limit=1,
                 node_types=["Chunk"],
+                boost_pinned=True,
+                exclude_status=["archived", "deprecated"],
             )
             for d in docs:
                 nid = d.metadata.get("node_id")
@@ -400,59 +395,141 @@ def autofill_profile(req: AutofillRequest) -> AutofillResponse:
             pass
 
     if not all_excerpts and not context_text:
-        raise HTTPException(
-            status_code=400,
-            detail="No KB content found. Ingest documents first.",
-        )
+        return AutofillResponse(values={}, confidence=0.0, sources_used=0)
 
     kb_text = "\n\n---\n\n".join(
         f"[Excerpt {i+1}]\n{e}" for i, e in enumerate(all_excerpts[:15])
     )
 
     # LLM extraction
+    system_prompt = _AUTOFILL_SCHEMA_PROMPT.replace("{field_schema}", field_schema_text)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", AUTOFILL_SYSTEM_PROMPT),
-        ("human", "{context}{kb_text}\n\nExtract the company profile."),
+        ("system", system_prompt),
+        ("human", "{context}{kb_text}\n\nExtract values for the form fields."),
     ])
 
     llm = get_llm("context_analysis")
     chain = prompt | llm | StrOutputParser()
 
     try:
-        raw = chain.invoke({
-            "context": context_text,
-            "kb_text": kb_text,
-        })
-
+        raw = chain.invoke({"context": context_text, "kb_text": kb_text})
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             match = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)
             if match:
                 cleaned = match.group(1).strip()
         parsed = json.loads(cleaned)
-
     except (json.JSONDecodeError, Exception) as e:
-        logger.exception("Autofill extraction failed")
-        raise HTTPException(status_code=500, detail=f"Profile extraction failed: {e}")
+        logger.exception("Schema autofill extraction failed")
+        raise HTTPException(status_code=500, detail=f"Autofill extraction failed: {e}")
 
-    # Build response
-    demo = parsed.get("demographic", {}) or {}
+    values = parsed.get("values", {})
+    confidence = min(1.0, max(0.0, float(parsed.get("confidence", 0.5))))
+
+    # Validate values against schema constraints
+    values = _validate_values(values, fillable)
+
     return AutofillResponse(
-        company_name=parsed.get("company_name"),
-        industry=parsed.get("industry"),
-        headcount=parsed.get("headcount"),
-        revenue=parsed.get("revenue"),
-        persona=parsed.get("persona"),
-        products=parsed.get("products", []),
-        competitors=parsed.get("competitors", []),
-        target_market=parsed.get("target_market"),
-        demographic=AutofillDemographic(
-            age_range=demo.get("age_range"),
-            income_bracket=demo.get("income_bracket"),
-            occupation=demo.get("occupation"),
-            location=demo.get("location"),
-            language=demo.get("language"),
-        ),
-        confidence=min(1.0, max(0.0, float(parsed.get("confidence", 0.5)))),
+        values=values,
+        confidence=confidence,
         sources_used=len(all_excerpts),
     )
+
+
+def _filter_fields_by_scope(
+    fields: List[SchemaField],
+    business_model: Optional[str],
+) -> List[SchemaField]:
+    """Filter fields whose scope doesn't match the business model."""
+    if not business_model or business_model == "both":
+        return fields
+    return [
+        f for f in fields
+        if f.scope is None or f.scope == "shared" or f.scope == business_model
+    ]
+
+
+def _build_field_schema_text(fields: List[SchemaField]) -> str:
+    """Format field definitions for the LLM prompt."""
+    lines = []
+    for f in fields:
+        parts = [f"- {f.name} ({f.type}): {f.label}"]
+        if f.options:
+            parts.append(f"  options: {f.options}")
+        if f.scope and f.scope != "shared":
+            parts.append(f"  scope: {f.scope}")
+        lines.append("\n".join(parts))
+    return "\n".join(lines)
+
+
+def _build_search_queries(fields: List[SchemaField]) -> List[str]:
+    """Derive KB search queries from field labels, grouped by theme."""
+    # Group labels by rough theme
+    business_labels = []
+    audience_labels = []
+    other_labels = []
+
+    business_keywords = {"business", "company", "industry", "revenue", "website", "name", "phone", "linkedin", "country", "region"}
+    audience_keywords = {"target", "audience", "customer", "demographic", "age", "gender", "income", "seniority", "job", "role", "hobbies", "interest"}
+
+    for f in fields:
+        label_lower = f.label.lower()
+        name_lower = f.name.lower()
+        combined = label_lower + " " + name_lower
+        if any(kw in combined for kw in audience_keywords):
+            audience_labels.append(f.label)
+        elif any(kw in combined for kw in business_keywords):
+            business_labels.append(f.label)
+        else:
+            other_labels.append(f.label)
+
+    queries = []
+    if business_labels:
+        queries.append("company " + " ".join(business_labels[:5]))
+    if audience_labels:
+        queries.append("target audience " + " ".join(audience_labels[:5]))
+    if other_labels:
+        queries.append(" ".join(other_labels[:5]))
+
+    # Always include broad queries
+    queries.append("company overview products services industry about")
+    queries.append("customer demographics target market audience segments")
+
+    return queries[:5]
+
+
+def _validate_values(
+    values: Dict[str, Any],
+    fields: List[SchemaField],
+) -> Dict[str, Any]:
+    """Ensure extracted values conform to field type constraints."""
+    field_map = {f.name: f for f in fields}
+    validated: Dict[str, Any] = {}
+
+    for name, value in values.items():
+        if value is None:
+            continue
+        field = field_map.get(name)
+        if not field:
+            continue
+
+        if field.type in ("select", "segmented_control"):
+            if field.options and value in field.options:
+                validated[name] = value
+            # Drop values not in options
+        elif field.type == "multi_select":
+            if isinstance(value, list) and field.options:
+                validated[name] = [v for v in value if v in field.options]
+            elif isinstance(value, list):
+                validated[name] = value
+        elif field.type == "checkbox":
+            validated[name] = bool(value)
+        elif field.type == "tag_input":
+            if isinstance(value, list):
+                validated[name] = [str(v) for v in value]
+        elif field.type in ("text", "textarea"):
+            validated[name] = str(value) if value else None
+        else:
+            validated[name] = value
+
+    return validated

@@ -79,21 +79,83 @@ def store_context_summary(
     topics: List[str],
     source_stats: Optional[Dict[str, Any]] = None,
     client_profile: Optional[Dict[str, Any]] = None,
+    granularity_level: str = "tenant",
+    scope_ref: Optional[str] = None,
+    source_chunk_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Store a validated context summary back to the memory layer.
+    """Store a validated summary back to the memory layer.
 
-    Sends the summary to the core API for storage.
+    granularity_level:
+      - 'tenant'   -> ContextSummary (whole client)
+      - 'document' -> DocumentSummary; scope_ref must be the document_id
+      - 'topic'    -> TopicSummary;    scope_ref must be the topic label
     """
     try:
-        result = core_client.upsert_context_summary(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            summary=summary,
-            topics=topics,
-            metadata=client_profile or {},
-            source_stats=source_stats or {},
-        )
+        if granularity_level == "document":
+            if not scope_ref:
+                return {"status": "error", "error": "scope_ref (document_id) required for granularity='document'"}
+            result = core_client.upsert_document_summary(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                document_id=scope_ref,
+                summary=summary,
+                topics=topics,
+                source_chunk_ids=source_chunk_ids or [],
+                source_stats=source_stats or {},
+                extra_metadata=client_profile or {},
+            )
+        elif granularity_level == "topic":
+            if not scope_ref:
+                return {"status": "error", "error": "scope_ref (topic) required for granularity='topic'"}
+            result = core_client.upsert_topic_summary(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                topic=scope_ref,
+                summary=summary,
+                topics=topics,
+                source_chunk_ids=source_chunk_ids or [],
+                source_stats=source_stats or {},
+                extra_metadata=client_profile or {},
+            )
+        else:
+            result = core_client.upsert_context_summary(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                summary=summary,
+                topics=topics,
+                metadata=client_profile or {},
+                source_stats=source_stats or {},
+                source_chunk_ids=source_chunk_ids or [],
+            )
         return {"status": "ok", **result}
     except Exception as e:
         logger.warning("store_context_summary failed: %s", e)
         return {"status": "error", "error": str(e)}
+
+
+@tool
+def get_document_summary(
+    tenant_id: str,
+    client_id: str,
+    document_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the canonical DocumentSummary for a given source document_id."""
+    return core_client.get_document_summary(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        document_id=document_id,
+    )
+
+
+@tool
+def get_topic_summary(
+    tenant_id: str,
+    client_id: str,
+    topic: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the canonical TopicSummary for a given topic label."""
+    return core_client.get_topic_summary(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        topic=topic,
+    )

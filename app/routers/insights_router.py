@@ -46,3 +46,35 @@ def generate_insights(req: InsightsGenerateRequest):
         raise HTTPException(status_code=500, detail=f"Insights generation failed: {e}")
 
     return result
+
+
+class InsightAnalyzeRequest(BaseModel):
+    tenant_id: UUID
+    client_id: Optional[UUID] = None
+    question: str = Field(min_length=1)
+    contradiction_check: bool = False
+
+
+@router.post("/analyze")
+def analyze_insight(req: InsightAnalyzeRequest):
+    """Evidence-backed synthesis over summary + source chunks.
+
+    Retrieves via hop-1 from summary chunks (which mention-edge back to their
+    source evidence), then synthesizes an answer whose every factual claim
+    cites a SOURCE chunk. Summaries are navigation only — they are never used
+    as the citation target.
+    """
+    from app.workflows.insight_workflow import run_insight_analysis
+
+    try:
+        result = run_insight_analysis(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id) if req.client_id else None,
+            question=req.question,
+            contradiction_check=req.contradiction_check,
+        )
+    except Exception as e:
+        logger.exception("Insight analysis failed")
+        raise HTTPException(status_code=500, detail=f"Insight analysis failed: {e}")
+
+    return result

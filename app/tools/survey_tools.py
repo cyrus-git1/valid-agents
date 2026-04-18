@@ -25,20 +25,40 @@ def get_context_summary(
     tenant_id: str,
     client_id: str,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch the existing context summary for this tenant+client.
+    """Fetch all available context summaries for this tenant+client.
 
-    Returns {summary, topics} with high-level business context.
-    Use this alongside search_knowledge_base to ground survey questions
-    in the company's actual industry, products, and audience.
+    Returns the tenant-wide summary {summary, topics} plus any document-level
+    and topic-level summaries. Use this alongside search_knowledge_base to
+    ground survey questions in the company's actual industry, products,
+    and audience at multiple levels of detail.
     """
+    result: Dict[str, Any] = {}
     try:
-        return core_client.get_context_summary(
+        tenant_summary = core_client.get_context_summary(
             tenant_id=tenant_id,
             client_id=client_id,
         )
+        if tenant_summary:
+            result["summary"] = tenant_summary.get("summary", "")
+            result["topics"] = tenant_summary.get("topics", [])
     except Exception as e:
-        logger.warning("get_context_summary failed: %s", e)
-        return None
+        logger.warning("get_context_summary (tenant) failed: %s", e)
+
+    try:
+        all_summaries = core_client.list_summaries(
+            tenant_id=tenant_id,
+            client_id=client_id,
+        )
+        topic_summaries = [
+            s for s in all_summaries.get("summaries", [])
+            if s.get("source_type") == "TopicSummary" and s.get("summary")
+        ]
+        if topic_summaries:
+            result["topic_summaries"] = topic_summaries[:10]
+    except Exception as e:
+        logger.warning("get_context_summary (list) failed: %s", e)
+
+    return result if result else None
 
 
 @tool
@@ -62,6 +82,8 @@ def search_knowledge_base(
             top_k=top_k,
             hop_limit=hop_limit,
             node_types=["Chunk"],  # get actual content, not entity labels
+            boost_pinned=True,
+            exclude_status=["archived", "deprecated"],
         )
     except Exception as e:
         logger.warning("search_knowledge_base failed: %s", e)

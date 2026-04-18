@@ -35,8 +35,8 @@ from app.prompts.strategic_analysis_prompts import (
 )
 from app.llm_config import LLMConfig
 from app.analysis.base import BaseAnalysisService
-from app import core_client as _ctx  # replaces ContextSummaryService
-from app import core_client  # replaces SearchService
+from app import core_client as _ctx
+from app import core_client
 from app.serper_service import SerperService
 
 logger = logging.getLogger(__name__)
@@ -81,19 +81,10 @@ class StrategicAnalysisService(BaseAnalysisService):
         )
         transcript_context = self._build_transcript_context(transcript_chunks)
 
-        # Context summary — always regenerate to reflect latest ingested data
-        summary_svc = ContextSummaryService(self.sb)
-        logger.info("Regenerating context summary for tenant=%s client=%s", tenant_id, client_id)
-        try:
-            summary_result = summary_svc.generate_summary(
-                tenant_id=tenant_id, client_id=client_id, force_regenerate=True,
-            )
-            existing_summary = summary_result.get("summary_row")
-        except Exception as e:
-            logger.warning("Context summary regeneration failed: %s", e)
-            existing_summary = summary_svc.get_summary(
-                tenant_id=tenant_id, client_id=client_id,
-            )
+        existing_summary = _ctx.get_context_summary(
+            tenant_id=str(tenant_id),
+            client_id=str(client_id),
+        )
 
         if existing_summary:
             context_summary = (
@@ -129,11 +120,6 @@ class StrategicAnalysisService(BaseAnalysisService):
     ) -> Dict[str, Any]:
         """Execute the convergent analysis for a single focus_query (or overall summary)."""
 
-        # KG retrieval — use multiple diverse queries to maximize coverage
-        search_svc = SearchService(
-            tenant_id=shared.tenant_id, client_id=shared.client_id,
-        )
-
         retrieval_queries = [
             focus_query or "overall strategic summary",
             "key themes and important topics",
@@ -147,8 +133,12 @@ class StrategicAnalysisService(BaseAnalysisService):
 
         for rq in retrieval_queries:
             try:
-                docs = search_svc.graph_search(
-                    rq, top_k=per_query_k, hop_limit=hop_limit,
+                docs = core_client.search_graph(
+                    tenant_id=str(shared.tenant_id),
+                    client_id=str(shared.client_id),
+                    query=rq,
+                    top_k=per_query_k,
+                    hop_limit=hop_limit,
                 )
                 for doc in docs:
                     doc_id = id(doc)

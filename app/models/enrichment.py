@@ -23,7 +23,7 @@ class EnrichmentSource(BaseModel):
     title: str
     relevance_reason: str = Field(description="Why this source was selected")
     gap_topic: str = Field(description="Which gap this source addresses")
-    job_id: Optional[str] = Field(default=None, description="Ingest job ID for tracking")
+    job_id: Optional[str] = Field(default=None, description="Legacy ingest tracking field; may be absent for stateless ingest")
 
 
 class EnrichmentRunRequest(TenantScopedRequest):
@@ -41,8 +41,8 @@ class EnrichmentRunRequest(TenantScopedRequest):
 
 
 class EnrichmentRunResponse(StatusResponse):
-    """Response containing identified gaps and ingestion jobs."""
+    """Response containing identified gaps and candidate ingestion results."""
     gaps: List[EnrichmentGap] = Field(default_factory=list)
     sources: List[EnrichmentSource] = Field(default_factory=list)
-    job_ids: List[str] = Field(default_factory=list, description="Ingest job IDs to poll via /ingest/status/{id}")
+    job_ids: List[str] = Field(default_factory=list, description="Legacy ingest tracking IDs; usually empty for stateless ingest")
     context_sampled: int = Field(default=0, description="Number of KG excerpts analyzed")

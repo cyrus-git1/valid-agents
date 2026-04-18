@@ -56,7 +56,7 @@ class ContextBuildRequest(TenantScoped):
 
 
 class ContextBuildResponse(BaseModel):
-    job_id: str
+    job_id: Optional[str] = None
     status: str
     documents_ingested: int = 0
     weblinks_ingested: int = 0
@@ -65,9 +65,3 @@ class ContextBuildResponse(BaseModel):
     kg_nodes_upserted: int = 0
     kg_edges_upserted: int = 0
     warnings: List[str] = Field(default_factory=list)
-
-
-class ContextBuildStatusResponse(BaseModel):
-    job_id: str
-    status: str  # "running" | "complete" | "failed"
-    detail: Optional[Dict[str, Any]] = None

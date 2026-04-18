@@ -36,8 +36,9 @@ def search_knowledge_base(
 ) -> List[Dict[str, Any]]:
     """Search the knowledge base for content related to a query.
 
-    Returns chunks with similarity scores. Use this to sample what the
-    knowledge base currently covers for gap analysis.
+    Returns chunks with similarity scores. Uses hybrid ranking to boost
+    pinned/canonical content and exclude archived documents.
+    Use this to sample what the knowledge base currently covers for gap analysis.
     """
     try:
         docs = core_client.search_graph(
@@ -46,6 +47,8 @@ def search_knowledge_base(
             query=query,
             top_k=top_k,
             hop_limit=hop_limit,
+            boost_pinned=True,
+            exclude_status=["archived", "deprecated"],
         )
     except Exception as e:
         logger.warning("search_knowledge_base failed: %s", e)
@@ -56,6 +59,7 @@ def search_knowledge_base(
             "content": doc.page_content,
             "similarity_score": doc.metadata.get("similarity_score", 0.0),
             "node_id": doc.metadata.get("node_id"),
+            "document_id": doc.metadata.get("document_id"),
         }
         for doc in docs
     ]
@@ -66,19 +70,41 @@ def get_context_summary(
     tenant_id: str,
     client_id: str,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch the context summary for a tenant+client.
+    """Fetch all context summaries for a tenant+client.
 
-    Returns a dict with 'summary' (str) and 'topics' (list of str),
-    or None if no summary exists.
+    Returns the tenant-wide summary (summary, topics) plus any
+    document-level and topic-level summaries that exist.
+    This gives gap analysis a complete view of what the memory layer covers.
     """
+    result: Dict[str, Any] = {}
     try:
-        return core_client.get_context_summary(
+        tenant_summary = core_client.get_context_summary(
             tenant_id=tenant_id,
             client_id=client_id,
         )
+        if tenant_summary:
+            result["summary"] = tenant_summary.get("summary", "")
+            result["topics"] = tenant_summary.get("topics", [])
     except Exception as e:
-        logger.warning("get_context_summary failed: %s", e)
-        return None
+        logger.warning("get_context_summary (tenant) failed: %s", e)
+
+    try:
+        all_summaries = core_client.list_summaries(
+            tenant_id=tenant_id,
+            client_id=client_id,
+        )
+        summaries_list = all_summaries.get("summaries", [])
+        doc_topics = [
+            {"source_type": s.get("source_type"), "label": s.get("topic") or s.get("document_id"), "topics": s.get("topics", [])}
+            for s in summaries_list
+            if s.get("source_type") in ("DocumentSummary", "TopicSummary")
+        ]
+        if doc_topics:
+            result["sub_summaries"] = doc_topics
+    except Exception as e:
+        logger.warning("get_context_summary (list) failed: %s", e)
+
+    return result if result else None
 
 
 # ── Gap analysis tool ───────────────────────────────────────────────────────
@@ -178,10 +204,10 @@ def ingest_web_url(
     title: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Trigger ingestion of a web URL into the knowledge base.
+    """Recommend ingestion of a web URL into the knowledge base.
 
-    Scrapes the URL, chunks the content, embeds, and stores in the KG.
-    Returns a dict with 'job_id' on success or 'error' on failure.
+    Returns a recommendation payload for a caller to send to the stateless
+    ingest endpoint, or an error payload on failure.
     """
     try:
         # Send as a recommendation — the core API or user decides whether to ingest

@@ -48,6 +48,10 @@ class LLMConfig:
     # Harness manager
     MANAGER: str            = os.environ.get("LLM_MANAGER",            DEFAULT)
 
+    # Service agent (plan-execute-reflect)
+    SERVICE_PLANNER: str    = os.environ.get("LLM_SERVICE_PLANNER",    ROUTER)
+    SERVICE_AGENT: str      = os.environ.get("LLM_SERVICE_AGENT",      CONTEXT_ANALYSIS)
+
     # Optimizer (Claude via Anthropic)
     OPTIMIZER: str          = os.environ.get("LLM_OPTIMIZER",          "claude-sonnet-4-20250514")
 
@@ -76,6 +80,8 @@ _ROLE_MAP: dict[str, tuple[str, float]] = {
     "persona":            (LLMConfig.PERSONA,            LLMConfig.Temp.ANALYSIS),
     "enrichment":         (LLMConfig.ENRICHMENT,         LLMConfig.Temp.ANALYSIS),
     "manager":            (LLMConfig.MANAGER,            LLMConfig.Temp.PRECISE),
+    "service_planner":    (LLMConfig.SERVICE_PLANNER,    LLMConfig.Temp.ROUTING),
+    "service_agent":      (LLMConfig.SERVICE_AGENT,      LLMConfig.Temp.ANALYSIS),
 }
 
 

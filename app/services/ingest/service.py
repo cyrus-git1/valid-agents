@@ -40,14 +40,41 @@ class IngestService:
         "You are a named entity extraction system. You will receive text chunks "
         "from a document. Extract all named entities from the text.\n\n"
         "For each entity, return:\n"
-        "- name: the entity name as it appears in the text\n"
-        "- type: one of: person, organization, location, product, topic, concept, event, technology\n\n"
-        "Return a JSON array of objects. If no entities are found, return an empty array.\n"
-        "Only return the JSON array, no other text.\n\n"
+        "- name: the canonical, properly-cased entity name\n"
+        "- type: one of: Person, Organization, Location, Product, Topic, Concept, Event, Technology, Metric\n"
+        "- properties: an object with:\n"
+        "  - confidence: 0.0-1.0 — how certain you are this is a real entity (not a generic word)\n"
+        "  - aliases: array of alternate names/abbreviations found in the text "
+        "(e.g., 'IBM' for 'International Business Machines')\n"
+        "  - canonical_name: the normalized, most complete form of the name\n"
+        "  - Additional context fields when available:\n"
+        "    - For Person: role, organization\n"
+        "    - For Organization: industry, type (startup, enterprise, agency, etc.)\n"
+        "    - For Product: category, vendor\n"
+        "    - For Metric: value, unit, timeframe\n\n"
+        "Rules:\n"
+        "- Use Title Case for type values (Person, not person)\n"
+        "- Set confidence < 0.5 for ambiguous or generic terms\n"
+        "- Merge duplicates: if 'Acme' and 'Acme Corp' appear, return one entity "
+        "with canonical_name='Acme Corp' and aliases=['Acme']\n"
+        "- Do NOT extract common English words as entities\n"
+        "- Do NOT extract generic industry terms as entities unless they are specific "
+        "to the company (e.g., 'SaaS' is a concept, 'Salesforce' is an Organization)\n\n"
+        "Return ONLY a JSON array. If no entities are found, return [].\n\n"
         "Example output:\n"
-        '[{"name": "Acme Corp", "type": "organization"}, '
-        '{"name": "John Smith", "type": "person"}, '
-        '{"name": "Toronto", "type": "location"}]'
+        '[\n'
+        '  {"name": "Acme Corp", "type": "Organization", "properties": {'
+        '"confidence": 0.95, "aliases": ["Acme", "Acme Corporation"], '
+        '"canonical_name": "Acme Corp", "industry": "SaaS"}},\n'
+        '  {"name": "Jane Smith", "type": "Person", "properties": {'
+        '"confidence": 0.9, "aliases": ["Jane"], '
+        '"canonical_name": "Jane Smith", "role": "CEO", "organization": "Acme Corp"}},\n'
+        '  {"name": "Toronto", "type": "Location", "properties": {'
+        '"confidence": 0.85, "aliases": [], "canonical_name": "Toronto"}},\n'
+        '  {"name": "Customer Churn Rate", "type": "Metric", "properties": {'
+        '"confidence": 0.8, "aliases": ["churn rate"], '
+        '"canonical_name": "Customer Churn Rate", "value": "5.2%", "timeframe": "monthly"}}\n'
+        ']'
     )
     _NER_BATCH_SIZE = 10
 
@@ -383,28 +410,86 @@ class IngestService:
             except Exception as exc:
                 logger.warning("NER batch %d failed: %s", index, exc)
 
-        seen: set[tuple[str, str]] = set()
-        unique: List[JsonDict] = []
+        # Dedup by canonical_name (or name) + type, merging aliases
+        merged: dict[tuple[str, str], JsonDict] = {}
         for entity in all_entities:
             name = entity.get("name", "").strip()
-            entity_type = entity.get("type", "").strip().lower()
+            entity_type = entity.get("type", "").strip()
             if not name or not entity_type:
                 continue
-            key = (name.lower(), entity_type)
-            if key not in seen:
-                seen.add(key)
-                unique.append({"name": name, "type": entity_type})
 
+            props = entity.get("properties", {})
+            if not isinstance(props, dict):
+                props = {}
+
+            canonical = (props.get("canonical_name") or name).strip()
+            key = (canonical.lower(), entity_type.lower())
+
+            if key in merged:
+                # Merge aliases from duplicate
+                existing = merged[key]
+                existing_props = existing.get("properties", {})
+                existing_aliases = set(existing_props.get("aliases", []))
+                new_aliases = set(props.get("aliases", []))
+                # Add the current name as an alias if it differs from canonical
+                if name.lower() != canonical.lower():
+                    new_aliases.add(name)
+                existing_props["aliases"] = sorted(existing_aliases | new_aliases)
+                # Keep higher confidence
+                if props.get("confidence", 0) > existing_props.get("confidence", 0):
+                    existing_props["confidence"] = props["confidence"]
+                # Merge any extra properties (role, industry, etc.)
+                for k, v in props.items():
+                    if k not in ("confidence", "aliases", "canonical_name") and v and k not in existing_props:
+                        existing_props[k] = v
+            else:
+                # Normalize: ensure canonical_name and aliases are set
+                if "canonical_name" not in props:
+                    props["canonical_name"] = canonical
+                if "aliases" not in props:
+                    props["aliases"] = []
+                if name.lower() != canonical.lower() and name not in props["aliases"]:
+                    props["aliases"].append(name)
+                if "confidence" not in props:
+                    props["confidence"] = 0.7
+                merged[key] = {
+                    "name": canonical,
+                    "type": entity_type,
+                    "properties": props,
+                }
+
+        unique = list(merged.values())
         logger.info("NER: %d unique entities from %d chunks", len(unique), len(chunks))
         return unique
 
     def _merge_entities(self, extracted: List[JsonDict], submitted_entities) -> List[JsonDict]:
-        submitted = [{"name": entity.name, "type": entity.type, **entity.properties} for entity in (submitted_entities or [])]
-        seen_keys = {(entity["name"].lower(), entity["type"]) for entity in extracted}
-        for submitted_entity in submitted:
-            key = (submitted_entity["name"].lower(), submitted_entity["type"])
+        """Merge user-submitted entities with LLM-extracted ones.
+
+        Submitted entities are converted to the rich format (with properties)
+        and deduped against extracted entities by (canonical_name, type).
+        """
+        seen_keys = set()
+        for e in extracted:
+            props = e.get("properties", {})
+            canonical = (props.get("canonical_name") or e.get("name", "")).lower()
+            etype = e.get("type", "").lower()
+            seen_keys.add((canonical, etype))
+
+        for entity in (submitted_entities or []):
+            canonical = entity.name.strip()
+            etype = entity.type.strip()
+            key = (canonical.lower(), etype.lower())
             if key not in seen_keys:
-                extracted.append(submitted_entity)
+                extracted.append({
+                    "name": canonical,
+                    "type": etype,
+                    "properties": {
+                        "canonical_name": canonical,
+                        "aliases": [],
+                        "confidence": 1.0,  # user-submitted = high confidence
+                        **entity.properties,
+                    },
+                })
                 seen_keys.add(key)
         return extracted
 

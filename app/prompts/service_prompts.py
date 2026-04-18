@@ -70,9 +70,14 @@ PLAN_PROMPT = ChatPromptTemplate.from_messages([
         "'check out example.com' is NOT an ingest request — use ask_question instead.\n"
         "  'what documents do we have' → list_documents\n"
         "  'refresh the summary' → build_context\n"
-        "  'this document is wrong' / 'update this doc' → flag_document\n"
+        "  'this document is wrong' / 'update this doc' → flag_document (ONLY with a specific document ID)\n"
         "  'what's the status' / 'is everything working' / 'what's in the KB' → check_status\n"
+        "  'what was uploaded' / 'show me my documents' / 'what do we have' → list_documents\n"
+        "  'what needs to be deleted' / 'clean up documents' / 'show me what to remove' → list_documents\n"
         "  Any question about the business, market, competitors → ask_question\n\n"
+        "IMPORTANT: When the user asks about documents vaguely (e.g., 'what was uploaded', "
+        "'what needs to be deleted', 'show me my docs'), ALWAYS use list_documents or "
+        "check_status first. NEVER ask for clarification about which document — just show them all.\n\n"
         "Return ONLY valid JSON:\n"
         '{{\n'
         '  "reasoning": "Brief analysis of what the user wants",\n'

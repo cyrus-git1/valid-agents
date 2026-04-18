@@ -472,20 +472,12 @@ def _synthesize_from_results(
                 for d in docs:
                     title = d.get("title") or "Untitled"
                     source_url = d.get("source_url", "")
-                    chunk_count = d.get("chunk_count", d.get("chunks", 0))
                     status = d.get("status", "active")
-                    doc_id = d.get("id", "")
-                    preview = d.get("preview", "")
 
-                    header = f"- **{title}**"
                     if source_url and source_url.startswith("http"):
-                        header += f" ({source_url})"
-                    header += f" — {chunk_count} chunks, {status}"
-                    if doc_id:
-                        header += f"\n  ID: `{doc_id}`"
-                    if preview:
-                        header += f"\n  Preview: {preview[:150]}"
-                    lines.append(header)
+                        lines.append(f"- **{title}** — {source_url} ({status})")
+                    else:
+                        lines.append(f"- **{title}** ({status})")
                 parts.append("\n".join(lines))
 
         elif tool_name == "check_status":

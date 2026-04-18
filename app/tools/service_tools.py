@@ -297,22 +297,12 @@ def create_service_tools(
                 }
             documents = []
             for d in items[:20]:
-                chunks = d.get("chunks", [])
-                # Preview: first chunk content, truncated
-                preview = ""
-                if chunks:
-                    first_chunk = chunks[0]
-                    content = first_chunk.get("content", "")
-                    preview = content[:200] + "..." if len(content) > 200 else content
-
                 documents.append({
                     "id": d.get("id"),
                     "title": d.get("title") or "Untitled",
                     "source_url": d.get("source_uri") or d.get("source_type", "unknown"),
                     "source_type": d.get("source_type"),
                     "status": d.get("status", "active"),
-                    "chunk_count": len(chunks),
-                    "preview": preview,
                 })
             return {
                 "total": len(items),

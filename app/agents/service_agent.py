@@ -232,10 +232,11 @@ def _execute(
             "confidence": plan.get("confidence", 0.0),
         }
 
-    # Extract output, tool trace, and sources from messages
+    # Extract output, tool trace, tool results, and sources from messages
     messages = result.get("messages", [])
     output = ""
     tool_calls_trace: List[str] = []
+    tool_results: List[Dict[str, Any]] = []
     sources: List[Dict[str, Any]] = []
 
     for msg in messages:
@@ -246,16 +247,29 @@ def _execute(
 
         # Get the final AI message (no tool calls = final synthesis)
         if hasattr(msg, "content") and msg.type == "ai" and not getattr(msg, "tool_calls", None):
-            output = msg.content if isinstance(msg.content, str) else str(msg.content)
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if content.strip():
+                output = content
 
-        # Extract citations from tool results
+        # Capture tool results for fallback synthesis
         if msg.type == "tool" and hasattr(msg, "content"):
             try:
                 tool_result = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
-                if isinstance(tool_result, dict) and tool_result.get("citations"):
-                    sources.extend(tool_result["citations"])
+                if isinstance(tool_result, dict):
+                    tool_results.append(tool_result)
+                    if tool_result.get("citations"):
+                        sources.extend(tool_result["citations"])
+                elif isinstance(tool_result, list):
+                    tool_results.append({"items": tool_result})
             except (json.JSONDecodeError, TypeError):
                 pass
+
+    # If the agent didn't produce a final synthesis (just an affirmation
+    # or empty response), build one from the tool results
+    if not output or _is_just_affirmation(output):
+        fallback = _synthesize_from_results(tool_results, tool_calls_trace)
+        if fallback:
+            output = fallback
 
     # Determine intent from the first tool actually called
     intent = "unknown"
@@ -292,6 +306,100 @@ def _reflect(request: str, response: str) -> Dict[str, Any]:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+
+_AFFIRMATION_PHRASES = [
+    "let me", "i'll", "just a moment", "pulling up", "searching",
+    "looking up", "one moment", "sure thing", "great question",
+    "let me check", "let me look", "let me pull", "let me search",
+    "i will", "working on", "generating", "fetching",
+]
+
+
+def _is_just_affirmation(text: str) -> bool:
+    """Check if the text is just an acknowledgment with no real content."""
+    cleaned = text.strip().lower()
+    # Short messages that are just affirmations
+    if len(cleaned) < 200 and any(phrase in cleaned for phrase in _AFFIRMATION_PHRASES):
+        # Check if there's actual data content beyond the affirmation
+        has_data = any(
+            indicator in cleaned
+            for indicator in ("document", "chunk", "entity", "survey", "persona",
+                              "summary", "topic", "ingested", "found", "result")
+        )
+        return not has_data
+    return False
+
+
+def _synthesize_from_results(
+    tool_results: List[Dict[str, Any]],
+    tool_names: List[str],
+) -> str:
+    """Build a response from raw tool results when the agent didn't synthesize."""
+    if not tool_results:
+        return ""
+
+    parts: List[str] = []
+    for i, result in enumerate(tool_results):
+        tool_name = tool_names[i] if i < len(tool_names) else "unknown"
+
+        # Check for errors
+        if result.get("error"):
+            parts.append(f"I encountered an issue: {result['error']}")
+            continue
+
+        # Check for a human-readable message
+        if result.get("message"):
+            parts.append(result["message"])
+            continue
+
+        # Format based on tool type
+        if tool_name == "list_documents":
+            docs = result.get("documents", [])
+            total = result.get("total", len(docs))
+            if not docs:
+                parts.append("Your knowledge base is empty — no documents have been ingested yet.")
+            else:
+                lines = [f"You have {total} document(s) in your knowledge base:\n"]
+                for d in docs:
+                    title = d.get("title") or d.get("id", "Untitled")
+                    chunks = d.get("chunks", 0)
+                    status = d.get("status", "active")
+                    lines.append(f"- **{title}** ({d.get('source_type', 'unknown')}, {chunks} chunks, {status})")
+                parts.append("\n".join(lines))
+
+        elif tool_name == "check_status":
+            doc_count = result.get("document_count", 0)
+            summary_status = result.get("context_summary", "unknown")
+            parts.append(
+                f"Knowledge base status: {doc_count} document(s), "
+                f"context summary: {summary_status}."
+            )
+            docs = result.get("documents", [])
+            if docs:
+                lines = ["\nDocuments:"]
+                for d in docs:
+                    title = d.get("title") or d.get("id", "Untitled")
+                    lines.append(f"- **{title}** ({d.get('source_type', 'unknown')}, {d.get('chunks', 0)} chunks)")
+                parts.append("\n".join(lines))
+
+        elif tool_name == "ingest_url":
+            doc_id = result.get("document_id", "")
+            chunks = result.get("chunks_upserted", 0)
+            entities = result.get("entities_linked", 0)
+            uri = result.get("source_uri", "")
+            parts.append(
+                f"Successfully ingested {uri}. "
+                f"Stored {chunks} content chunks and linked {entities} entities."
+            )
+
+        elif result.get("answer"):
+            parts.append(result["answer"])
+
+        elif result.get("summary"):
+            parts.append(result["summary"])
+
+    return "\n\n".join(parts) if parts else ""
 
 
 def _intent_from_plan(plan: Dict[str, Any]) -> str:

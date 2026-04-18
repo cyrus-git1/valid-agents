@@ -61,8 +61,9 @@ class AgentQueryResponse(BaseModel):
     confidence: Optional[float] = None
 
 
-@agent_router.post("/query", response_model=AgentQueryResponse)
+@agent_router.post("/query", response_model=AgentQueryResponse, deprecated=True)
 def agent_query(req: AgentQueryRequest) -> AgentQueryResponse:
+    """Deprecated — use POST /agent/stream instead for SSE streaming."""
     try:
         result = run_service_agent(
             request=req.input,

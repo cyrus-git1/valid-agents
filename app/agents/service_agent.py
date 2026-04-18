@@ -50,6 +50,7 @@ _TOOL_INTENT_MAP: Dict[str, str] = {
     "flag_document": "revision",
     "get_summary": "summary",
     "search_kb": "search",
+    "check_status": "status",
 }
 
 

@@ -153,6 +153,10 @@ def create_service_tools(
         Scrapes the URL, chunks the content, extracts entities, and
         stores everything in the KB. Also regenerates the context summary.
         Accepts URLs with or without https:// prefix.
+
+        This is a synchronous operation that may take 30-60 seconds.
+        After completion, report the results to the user including
+        document_id, chunks stored, and entities found.
         """
         try:
             from app.models.ingest import IngestInput
@@ -170,14 +174,86 @@ def create_service_tools(
             result = IngestService().ingest(inp)
             return {
                 "document_id": str(result.document_id),
+                "source_uri": url,
                 "source_type": result.source_type,
                 "chunks_upserted": result.chunks_upserted,
+                "entities_linked": result.entities_linked,
                 "warnings": result.warnings,
                 "status": "complete",
+                "message": (
+                    f"Successfully ingested {url}. "
+                    f"Stored {result.chunks_upserted} content chunks and "
+                    f"linked {result.entities_linked} entities."
+                ),
             }
         except Exception as e:
             logger.warning("ingest_url failed: %s", e)
-            return {"error": str(e), "status": "failed"}
+            return {"error": str(e), "status": "failed", "source_uri": web_url}
+
+    @tool
+    def check_status() -> Dict[str, Any]:
+        """Check the current state of the knowledge base.
+
+        Returns document count, context summary status, and any
+        recent activity. Use this when the user asks about the state
+        of their data, what's been ingested, or whether things are working.
+        """
+        result: Dict[str, Any] = {}
+
+        # Document count
+        try:
+            data = core_client.list_documents(
+                tenant_id=tenant_id,
+                client_id=client_id,
+            )
+            items = data.get("items", [])
+            result["document_count"] = len(items)
+            result["documents"] = [
+                {
+                    "id": d.get("id"),
+                    "title": d.get("title"),
+                    "source_type": d.get("source_type"),
+                    "status": d.get("status"),
+                    "chunks": len(d.get("chunks", [])),
+                }
+                for d in items[:10]
+            ]
+        except Exception as e:
+            result["document_count"] = 0
+            result["document_error"] = str(e)
+
+        # Context summary status
+        try:
+            summary = core_client.get_context_summary(
+                tenant_id=tenant_id,
+                client_id=client_id,
+            )
+            if summary and summary.get("summary"):
+                result["context_summary"] = "available"
+                result["topics"] = summary.get("topics", [])
+            else:
+                result["context_summary"] = "not_built"
+        except Exception:
+            result["context_summary"] = "not_built"
+
+        # Summary counts
+        try:
+            all_summaries = core_client.list_summaries(
+                tenant_id=tenant_id,
+                client_id=client_id,
+            )
+            summaries_list = all_summaries.get("summaries", [])
+            result["document_summaries"] = sum(
+                1 for s in summaries_list if s.get("source_type") == "DocumentSummary"
+            )
+            result["topic_summaries"] = sum(
+                1 for s in summaries_list if s.get("source_type") == "TopicSummary"
+            )
+        except Exception:
+            pass
+
+        result["status"] = "ok"
+        return result
 
     @tool
     def build_context(force_regenerate: bool = False) -> Dict[str, Any]:
@@ -340,4 +416,5 @@ def create_service_tools(
         flag_document,
         get_summary,
         search_kb,
+        check_status,
     ]

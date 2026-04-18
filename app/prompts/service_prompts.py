@@ -52,7 +52,8 @@ PLAN_PROMPT = ChatPromptTemplate.from_messages([
         "  list_documents   — Show what documents are in the knowledge base\n"
         "  flag_document    — Update/replace a document with corrected content\n"
         "  get_summary      — Quick look at the current business context summary\n"
-        "  search_kb        — Raw search for specific content in the KB\n\n"
+        "  search_kb        — Raw search for specific content in the KB\n"
+        "  check_status     — Check KB state: document count, summary status, recent activity\n\n"
         "INTENT MAPPING — match the user's intent, not their exact words:\n"
         "  'tell me about my customers' → find_personas\n"
         "  'who buys our product' → find_personas\n"
@@ -70,6 +71,7 @@ PLAN_PROMPT = ChatPromptTemplate.from_messages([
         "  'what documents do we have' → list_documents\n"
         "  'refresh the summary' → build_context\n"
         "  'this document is wrong' / 'update this doc' → flag_document\n"
+        "  'what's the status' / 'is everything working' / 'what's in the KB' → check_status\n"
         "  Any question about the business, market, competitors → ask_question\n\n"
         "Return ONLY valid JSON:\n"
         '{{\n'

@@ -458,8 +458,16 @@ class IngestService:
                     "properties": props,
                 }
 
-        unique = list(merged.values())
-        logger.info("NER: %d unique entities from %d chunks", len(unique), len(chunks))
+        # Filter out low-confidence entities to reduce variance
+        _MIN_CONFIDENCE = 0.5
+        unique = [
+            e for e in merged.values()
+            if e.get("properties", {}).get("confidence", 0) >= _MIN_CONFIDENCE
+        ]
+        filtered_count = len(merged) - len(unique)
+        if filtered_count:
+            logger.info("NER: filtered %d low-confidence entities (< %.1f)", filtered_count, _MIN_CONFIDENCE)
+        logger.info("NER: %d entities from %d chunks", len(unique), len(chunks))
         return unique
 
     def _merge_entities(self, extracted: List[JsonDict], submitted_entities) -> List[JsonDict]:

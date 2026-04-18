@@ -276,10 +276,12 @@ def create_service_tools(
 
     @tool
     def list_documents() -> Dict[str, Any]:
-        """List all documents in the knowledge base.
+        """List all documents in the knowledge base with chunk previews.
 
-        Returns document metadata including titles, types, status,
-        and chunk counts. Use this to see what content is available.
+        Returns document metadata (title, source URL, type, status),
+        chunk count, and a preview of the first chunk's content for each
+        document. Use this when the user asks what's been uploaded,
+        what's available, or what can be deleted.
         """
         try:
             data = core_client.list_documents(
@@ -287,18 +289,34 @@ def create_service_tools(
                 client_id=client_id,
             )
             items = data.get("items", [])
+            if not items:
+                return {
+                    "total": 0,
+                    "documents": [],
+                    "message": "Your knowledge base is empty — no documents have been ingested yet.",
+                }
+            documents = []
+            for d in items[:20]:
+                chunks = d.get("chunks", [])
+                # Preview: first chunk content, truncated
+                preview = ""
+                if chunks:
+                    first_chunk = chunks[0]
+                    content = first_chunk.get("content", "")
+                    preview = content[:200] + "..." if len(content) > 200 else content
+
+                documents.append({
+                    "id": d.get("id"),
+                    "title": d.get("title") or "Untitled",
+                    "source_url": d.get("source_uri") or d.get("source_type", "unknown"),
+                    "source_type": d.get("source_type"),
+                    "status": d.get("status", "active"),
+                    "chunk_count": len(chunks),
+                    "preview": preview,
+                })
             return {
                 "total": len(items),
-                "documents": [
-                    {
-                        "id": d.get("id"),
-                        "title": d.get("title"),
-                        "source_type": d.get("source_type"),
-                        "status": d.get("status"),
-                        "chunks": len(d.get("chunks", [])),
-                    }
-                    for d in items[:20]
-                ],
+                "documents": documents,
             }
         except Exception as e:
             logger.warning("list_documents failed: %s", e)

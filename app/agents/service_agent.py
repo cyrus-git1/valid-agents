@@ -470,10 +470,22 @@ def _synthesize_from_results(
             else:
                 lines = [f"You have {total} document(s) in your knowledge base:\n"]
                 for d in docs:
-                    title = d.get("title") or d.get("id", "Untitled")
-                    chunks = d.get("chunks", 0)
+                    title = d.get("title") or "Untitled"
+                    source_url = d.get("source_url", "")
+                    chunk_count = d.get("chunk_count", d.get("chunks", 0))
                     status = d.get("status", "active")
-                    lines.append(f"- **{title}** ({d.get('source_type', 'unknown')}, {chunks} chunks, {status})")
+                    doc_id = d.get("id", "")
+                    preview = d.get("preview", "")
+
+                    header = f"- **{title}**"
+                    if source_url and source_url.startswith("http"):
+                        header += f" ({source_url})"
+                    header += f" — {chunk_count} chunks, {status}"
+                    if doc_id:
+                        header += f"\n  ID: `{doc_id}`"
+                    if preview:
+                        header += f"\n  Preview: {preview[:150]}"
+                    lines.append(header)
                 parts.append("\n".join(lines))
 
         elif tool_name == "check_status":

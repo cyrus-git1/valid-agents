@@ -76,6 +76,19 @@ def run_service_agent(
     if plan.get("is_conversation"):
         return _handle_conversation(request)
 
+    # Plan detected out-of-scope request
+    if plan.get("is_out_of_scope"):
+        return {
+            "intent": "out_of_scope",
+            "output": (
+                "I'm here to help with your market research on Valid — I can search "
+                "your knowledge base, generate surveys, discover personas, and more. "
+                "That question falls outside what I can help with."
+            ),
+            "sources": [],
+            "confidence": 1.0,
+        }
+
     if plan.get("needs_clarification"):
         return {
             "intent": "clarification",
@@ -129,6 +142,18 @@ async def stream_service_agent(
         if plan.get("is_conversation"):
             result = _handle_conversation(request)
             yield {"type": "done", **result}
+            return
+
+        if plan.get("is_out_of_scope"):
+            yield {"type": "done",
+                   "intent": "out_of_scope",
+                   "output": (
+                       "I'm here to help with your market research on Valid — I can search "
+                       "your knowledge base, generate surveys, discover personas, and more. "
+                       "That question falls outside what I can help with."
+                   ),
+                   "sources": [],
+                   "confidence": 1.0}
             return
 
         if plan.get("needs_clarification"):

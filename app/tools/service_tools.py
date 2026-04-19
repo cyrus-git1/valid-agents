@@ -295,8 +295,19 @@ def create_service_tools(
                     "documents": [],
                     "message": "Your knowledge base is empty — no documents have been ingested yet.",
                 }
+            # Filter out internal documents (summaries are system-generated, not user content)
+            _INTERNAL_TYPES = {"ContextSummary", "DocumentSummary", "TopicSummary"}
+            user_items = [d for d in items if d.get("source_type") not in _INTERNAL_TYPES]
+
+            if not user_items:
+                return {
+                    "total": 0,
+                    "documents": [],
+                    "message": "Your knowledge base is empty — no documents have been ingested yet.",
+                }
+
             documents = []
-            for d in items[:20]:
+            for d in user_items[:20]:
                 documents.append({
                     "id": d.get("id"),
                     "title": d.get("title") or "Untitled",
@@ -305,7 +316,7 @@ def create_service_tools(
                     "status": d.get("status", "active"),
                 })
             return {
-                "total": len(items),
+                "total": len(user_items),
                 "documents": documents,
             }
         except Exception as e:

@@ -39,6 +39,61 @@ from app.tools.service_tools import create_service_tools
 
 logger = logging.getLogger(__name__)
 
+# ── Episodic memory (session history) ─────────────────────────────────────
+#
+# In-memory cache of recent conversation turns keyed by "tenant_id:client_id".
+# Keeps the last N exchanges so follow-up messages have context.
+# TTL-based: entries expire after 30 minutes of inactivity.
+
+import threading
+import time as _time
+
+_SESSION_TTL_S = 1800  # 30 minutes
+_SESSION_MAX_TURNS = 20  # keep last 20 exchanges (40 messages)
+_session_history: Dict[str, Dict[str, Any]] = {}
+_session_lock = threading.Lock()
+
+
+def _get_session_history(key: str) -> Optional[List[Dict[str, str]]]:
+    """Get conversation history for a session, or None if expired/missing."""
+    with _session_lock:
+        session = _session_history.get(key)
+        if not session:
+            return None
+        if _time.monotonic() > session["expires_at"]:
+            del _session_history[key]
+            return None
+        return session["messages"]
+
+
+def _append_to_history(key: str, user_msg: str, assistant_msg: str) -> None:
+    """Append a user/assistant exchange to session history."""
+    with _session_lock:
+        if key not in _session_history:
+            _session_history[key] = {
+                "messages": [],
+                "expires_at": _time.monotonic() + _SESSION_TTL_S,
+            }
+        session = _session_history[key]
+        session["messages"].append({"role": "user", "content": user_msg})
+        session["messages"].append({"role": "assistant", "content": assistant_msg})
+        # Trim to max turns
+        if len(session["messages"]) > _SESSION_MAX_TURNS * 2:
+            session["messages"] = session["messages"][-_SESSION_MAX_TURNS * 2:]
+        session["expires_at"] = _time.monotonic() + _SESSION_TTL_S
+
+
+def _format_history(history: Optional[List[Dict[str, str]]]) -> str:
+    """Format conversation history as a string for prompt injection."""
+    if not history:
+        return ""
+    lines = ["Previous conversation:"]
+    for msg in history[-10:]:  # last 5 exchanges
+        role = "User" if msg["role"] == "user" else "Assistant"
+        lines.append(f"  {role}: {msg['content'][:200]}")
+    return "\n".join(lines)
+
+
 # Map tool name → intent string for AgentQueryResponse compatibility
 _TOOL_INTENT_MAP: Dict[str, str] = {
     "ask_question": "retrieval",
@@ -63,14 +118,21 @@ def run_service_agent(
 ) -> Dict[str, Any]:
     """Entry point. Returns {intent, output, sources, confidence}.
 
-    Compatible with the existing AgentQueryResponse contract.
+    Conversation history is managed automatically via episodic memory —
+    a per-session cache keyed by (tenant_id, client_id) that stores
+    recent exchanges so follow-up messages have context.
     """
+    session_key = f"{tenant_id}:{client_id}"
+    history = _get_session_history(session_key)
+
     # ── Phase 0: Quick conversation check ──────────────────────────────
-    if _is_likely_conversation(request):
-        return _handle_conversation(request)
+    if _is_likely_conversation(request) and not history:
+        result = _handle_conversation(request)
+        _append_to_history(session_key, request, result["output"])
+        return result
 
     # ── Phase 1: Plan ──────────────────────────────────────────────────
-    plan = _plan(request)
+    plan = _plan(request, history)
 
     # Plan detected conversation
     if plan.get("is_conversation"):
@@ -98,7 +160,7 @@ def run_service_agent(
         }
 
     # ── Phase 2: Execute ───────────────────────────────────────────────
-    result = _execute(request, plan, tenant_id, client_id, client_profile)
+    result = _execute(request, plan, tenant_id, client_id, client_profile, history)
 
     # ── Phase 3: Reflect (only for multi-step plans) ───────────────────
     steps = plan.get("steps", [])
@@ -108,6 +170,7 @@ def run_service_agent(
             gaps_text = "; ".join(reflection["gaps"])
             result["output"] += f"\n\nNote: some aspects may be incomplete — {gaps_text}"
 
+    _append_to_history(session_key, request, result.get("output", ""))
     return result
 
 
@@ -128,40 +191,43 @@ async def stream_service_agent(
       done    — final result with intent, output, sources, confidence
       error   — something went wrong
     """
+    session_key = f"{tenant_id}:{client_id}"
+    history = _get_session_history(session_key)
+
     try:
         # ── Phase 0: Conversation fast path ────────────────────────────
-        if _is_likely_conversation(request):
+        if _is_likely_conversation(request) and not history:
             result = _handle_conversation(request)
+            _append_to_history(session_key, request, result["output"])
             yield {"type": "done", **result}
             return
 
         # ── Phase 1: Plan ──────────────────────────────────────────────
         yield {"type": "status", "message": "Planning..."}
-        plan = await asyncio.to_thread(_plan, request)
+        plan = await asyncio.to_thread(_plan, request, history)
 
         if plan.get("is_conversation"):
             result = _handle_conversation(request)
+            _append_to_history(session_key, request, result["output"])
             yield {"type": "done", **result}
             return
 
         if plan.get("is_out_of_scope"):
-            yield {"type": "done",
-                   "intent": "out_of_scope",
-                   "output": (
-                       "I'm here to help with your market research on Valid — I can search "
-                       "your knowledge base, generate surveys, discover personas, and more. "
-                       "That question falls outside what I can help with."
-                   ),
-                   "sources": [],
-                   "confidence": 1.0}
+            out = (
+                "I'm here to help with your market research on Valid — I can search "
+                "your knowledge base, generate surveys, discover personas, and more. "
+                "That question falls outside what I can help with."
+            )
+            _append_to_history(session_key, request, out)
+            yield {"type": "done", "intent": "out_of_scope", "output": out,
+                   "sources": [], "confidence": 1.0}
             return
 
         if plan.get("needs_clarification"):
-            yield {"type": "done",
-                   "intent": "clarification",
-                   "output": plan.get("clarification_message", "Could you clarify your request?"),
-                   "sources": [],
-                   "confidence": plan.get("confidence", 0.0)}
+            out = plan.get("clarification_message", "Could you clarify your request?")
+            _append_to_history(session_key, request, out)
+            yield {"type": "done", "intent": "clarification", "output": out,
+                   "sources": [], "confidence": plan.get("confidence", 0.0)}
             return
 
         # ── Phase 2: Execute ───────────────────────────────────────────
@@ -171,7 +237,7 @@ async def stream_service_agent(
         yield {"type": "status", "message": status_msg}
 
         result = await asyncio.to_thread(
-            _execute, request, plan, tenant_id, client_id, client_profile,
+            _execute, request, plan, tenant_id, client_id, client_profile, history,
         )
 
         # Stream the output
@@ -188,6 +254,7 @@ async def stream_service_agent(
                 gaps_text = "; ".join(reflection["gaps"])
                 result["output"] += f"\n\nNote: some aspects may be incomplete — {gaps_text}"
 
+        _append_to_history(session_key, request, result.get("output", ""))
         yield {"type": "done", **result}
 
     except Exception as e:
@@ -275,13 +342,17 @@ def _handle_conversation(request: str) -> Dict[str, Any]:
 # ── Plan ───────────────────────────────────────────────────────────────────
 
 
-def _plan(request: str) -> Dict[str, Any]:
+def _plan(request: str, history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """Single LLM call to produce a structured execution plan."""
     llm = get_llm("service_planner")
     chain = PLAN_PROMPT | llm | StrOutputParser()
 
+    # Prepend conversation history so the planner has context
+    history_text = _format_history(history)
+    plan_input = f"{history_text}\n\nCurrent request: {request}" if history_text else request
+
     try:
-        raw = chain.invoke({"request": request})
+        raw = chain.invoke({"request": plan_input})
         plan = _parse_json(raw)
         if plan and ("steps" in plan or plan.get("is_conversation")):
             return plan
@@ -315,6 +386,7 @@ def _execute(
     tenant_id: str,
     client_id: str,
     client_profile: Optional[Dict[str, Any]],
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Run the ReAct agent with the plan injected into the system prompt."""
     tools = create_service_tools(tenant_id, client_id, client_profile)
@@ -322,6 +394,11 @@ def _execute(
     # Inject plan into execute prompt
     plan_text = json.dumps(plan.get("steps", []), indent=2)
     system_prompt = EXECUTE_PROMPT.replace("{plan_json}", plan_text)
+
+    # Add conversation history to system prompt
+    history_text = _format_history(history)
+    if history_text:
+        system_prompt += f"\n\n{history_text}"
 
     try:
         from langgraph.prebuilt import create_react_agent

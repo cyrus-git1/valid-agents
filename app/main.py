@@ -25,7 +25,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 
-from app.router import agent_router, persona_router, enrich_router, survey_router
+from app.router import agent_router, valid_router, persona_router, enrich_router, survey_router
 from app.routers.ingest_router import router as ingest_router
 from app.routers.context_router import router as context_router
 from app.routers.panel_router import router as panel_router
@@ -54,6 +54,7 @@ app.add_middleware(RateLimiterMiddleware)
 
 # Existing agent routers
 app.include_router(agent_router)
+app.include_router(valid_router)
 app.include_router(persona_router)
 app.include_router(enrich_router)
 app.include_router(survey_router)

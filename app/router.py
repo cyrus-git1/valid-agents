@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.agents.service_agent import run_service_agent, stream_service_agent
+from app.agents.valid_agent import stream_valid_agent
 from app.agents.persona_agent import run_persona_agent
 from app.agents.enrichment_agent import run_enrichment_agent
 from app.models.base import StatusResponse, TenantScopedRequest
@@ -40,6 +41,7 @@ from app import core_client
 logger = logging.getLogger(__name__)
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
+valid_router = APIRouter(prefix="/valid", tags=["valid-chat"])
 persona_router = APIRouter(prefix="/persona", tags=["persona"])
 enrich_router = APIRouter(prefix="/enrich", tags=["enrich"])
 survey_router = APIRouter(prefix="/survey", tags=["survey"])
@@ -100,6 +102,33 @@ async def agent_stream(req: AgentQueryRequest):
             tenant_id=str(req.tenant_id),
             client_id=str(req.client_id),
             client_profile=req.client_profile,
+        ):
+            yield {"data": json.dumps(event, default=str)}
+
+    return EventSourceResponse(event_generator())
+
+
+# ── Valid docs chat ─────────────────────────────────────────────────────────
+
+
+class ValidChatRequest(BaseModel):
+    input: str = Field(..., description="User question about Valid")
+    session_id: Optional[str] = Field(default="default", description="Session ID for conversation history")
+
+
+@valid_router.post("/stream")
+async def valid_stream(req: ValidChatRequest):
+    """Chat with Valid's internal knowledge base via SSE.
+
+    No tenant/client required. Searches Valid's own docs and returns
+    a streamed response.
+    """
+    from sse_starlette.sse import EventSourceResponse
+
+    async def event_generator():
+        async for event in stream_valid_agent(
+            request=req.input,
+            session_id=req.session_id or "default",
         ):
             yield {"data": json.dumps(event, default=str)}
 

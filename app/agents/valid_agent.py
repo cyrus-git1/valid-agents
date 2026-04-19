@@ -1,9 +1,9 @@
 """
-Valid docs chat agent — lightweight agent that only searches Valid's
-internal knowledge base via /search/valid.
+Valid sales chat agent — ReAct agent that can search Valid's KB,
+show pricing/sales models, and book demos.
 
-No tenant/client scoping, no plan-execute-reflect, no tool chaining.
-Just: search the KB, synthesize an answer, stream it back.
+Guardrails: only answers questions about Valid, pricing, or demos.
+Anything outside that scope is politely refused.
 
 Usage
 -----
@@ -15,11 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
-
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
 
 from app.llm_config import get_llm
 from app.tools.valid_tools import create_valid_tools
@@ -27,14 +23,34 @@ from app.tools.valid_tools import create_valid_tools
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
-    "You are a helpful, professional assistant for Valid — a market research "
-    "platform that helps businesses validate ideas through real customer "
-    "feedback and AI-driven insights.\n\n"
-    "You answer questions about Valid using ONLY the search results provided. "
-    "Never make up information. If the search results don't contain the answer, "
-    "say so honestly.\n\n"
-    "Keep responses concise and friendly. Use the search results to back up "
-    "every claim."
+    "You are Vera, Valid's friendly and professional sales assistant. "
+    "Valid is a market research platform that helps businesses validate ideas "
+    "through real customer feedback and AI-driven insights.\n\n"
+    "YOUR CAPABILITIES (use the tools):\n"
+    "1. Answer questions about Valid — product, features, use cases, team\n"
+    "2. Show pricing, plans, and sales models\n"
+    "3. Book demos for interested prospects\n\n"
+    "GUARDRAILS — strictly enforced:\n"
+    "- You ONLY discuss Valid, its product, pricing, and demo booking.\n"
+    "- REFUSE anything unrelated: programming, medical advice, general knowledge, "
+    "math, science, other companies, news, weather, etc.\n"
+    "- When refusing, say: 'I'm here to help you learn about Valid and book a demo. "
+    "I can't help with that topic, but feel free to ask me anything about Valid!'\n"
+    "- NEVER answer from your own training data. ALL answers must come from "
+    "search_valid or get_pricing tool results.\n"
+    "- If the search returns no results, say so honestly — don't guess.\n\n"
+    "DEMO BOOKING FLOW:\n"
+    "- When someone wants a demo, collect their name and email (required), "
+    "plus company and role (optional).\n"
+    "- If they provide info gradually across messages, gather it step by step.\n"
+    "- Once you have name + email, call book_demo.\n"
+    "- Be conversational — don't ask for all fields at once like a form.\n\n"
+    "PERSONALITY:\n"
+    "- Warm, concise, professional — like a knowledgeable sales rep.\n"
+    "- Proactively suggest a demo when the user seems interested.\n"
+    "- When discussing features, relate them to business outcomes.\n"
+    "- Call the tools. Do NOT respond until you have tool results.\n"
+    "- Your final response MUST include actual data from tool results."
 )
 
 _CONVERSATION_PATTERNS = {
@@ -97,11 +113,6 @@ def _is_chitchat(request: str) -> bool:
     cleaned = request.strip().lower().rstrip("!?.,:;")
     if cleaned in _CONVERSATION_PATTERNS:
         return True
-    words = cleaned.split()
-    if len(words) <= 2 and not any(
-        kw in cleaned for kw in ("valid", "product", "feature", "price", "survey", "research")
-    ):
-        return True
     return False
 
 
@@ -109,31 +120,25 @@ async def stream_valid_agent(
     request: str,
     session_id: str = "default",
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Stream responses from the Valid docs chat agent."""
+    """Stream responses from the Valid sales chat agent."""
     history = _get_history(session_id)
 
     try:
         # Chitchat fast path
         if _is_chitchat(request) and not history:
-            out = "Hey! I'm Valid's assistant. Ask me anything about Valid — our product, features, pricing, or how we help with market research."
+            out = (
+                "Hey! I'm Vera, Valid's assistant. I can tell you about our platform, "
+                "show you our pricing and plans, or book a demo with our team. "
+                "What would you like to know?"
+            )
             _append_history(session_id, request, out)
             yield {"type": "done", "output": out, "sources": []}
             return
 
-        # Search
-        yield {"type": "status", "message": "Searching Valid's knowledge base..."}
-        search_results = await asyncio.to_thread(_search, request, history)
-
-        if not search_results or (len(search_results) == 1 and search_results[0].get("error")):
-            out = "I couldn't find anything about that in Valid's knowledge base. Could you rephrase your question?"
-            _append_history(session_id, request, out)
-            yield {"type": "done", "output": out, "sources": []}
-            return
-
-        # Synthesize
-        yield {"type": "status", "message": "Generating response..."}
+        # Run ReAct agent
+        yield {"type": "status", "message": "Thinking..."}
         output, sources = await asyncio.to_thread(
-            _synthesize, request, search_results, history
+            _run_agent, request, history,
         )
 
         _append_history(session_id, request, output)
@@ -146,65 +151,68 @@ async def stream_valid_agent(
         yield {"type": "error", "message": str(e)}
 
 
-def _search(
+def _run_agent(
     request: str,
-    history: Optional[List[Dict[str, str]]] = None,
-) -> List[Dict[str, Any]]:
-    """Search Valid's KB, using history for context."""
-    tools = create_valid_tools()
-    search_tool = tools[0]
-
-    # Build search query with history context
-    query = request
-    if history:
-        # Include recent context for better search relevance
-        recent = [m["content"] for m in history[-4:] if m["role"] == "user"]
-        if recent:
-            query = f"{' '.join(recent)} {request}"
-
-    return search_tool.invoke({"query": query, "top_k": 5})
-
-
-def _synthesize(
-    request: str,
-    results: List[Dict[str, Any]],
     history: Optional[List[Dict[str, str]]] = None,
 ) -> tuple:
-    """Synthesize an answer from search results."""
-    context = "\n\n".join(
-        f"[{i+1}] {r.get('content', '')}"
-        for i, r in enumerate(results)
-        if r.get("content")
-    )
+    """Run the ReAct agent synchronously."""
+    tools = create_valid_tools()
 
-    history_text = _format_history(history)
+    # Build system prompt with history
     system = _SYSTEM_PROMPT
+    history_text = _format_history(history)
     if history_text:
         system += f"\n\n{history_text}"
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system),
-        ("human", "Search results:\n{context}\n\nQuestion: {question}\n\nAnswer based on the search results above."),
-    ])
-
-    llm = get_llm("context_analysis")
-    chain = prompt | llm | StrOutputParser()
+    try:
+        from langgraph.prebuilt import create_react_agent
+        llm = get_llm("service_agent")
+        agent = create_react_agent(model=llm, tools=tools, prompt=system)
+    except ImportError:
+        logger.error("create_react_agent not available")
+        return "Agent is not available.", []
 
     try:
-        output = chain.invoke({"context": context, "question": request})
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": request}]},
+            config={"recursion_limit": 10},
+        )
     except Exception as e:
-        logger.warning("Valid synthesis failed: %s", e)
-        output = "I found some relevant information but had trouble putting it together. Please try again."
+        logger.exception("Valid ReAct agent failed")
+        return f"I ran into an issue — {e}. Could you try again?", []
 
-    # Build sources
-    sources = [
-        {
-            "document_id": r.get("document_id"),
-            "chunk_index": r.get("chunk_index"),
-            "similarity_score": r.get("similarity_score"),
-        }
-        for r in results
-        if r.get("document_id")
-    ]
+    # Extract output and sources
+    messages = result.get("messages", [])
+    output = ""
+    sources: List[Dict[str, Any]] = []
+
+    for msg in messages:
+        # Final AI message (no tool calls)
+        if hasattr(msg, "content") and msg.type == "ai" and not getattr(msg, "tool_calls", None):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if content.strip():
+                output = content
+
+        # Extract search sources from tool results
+        if msg.type == "tool" and hasattr(msg, "content"):
+            try:
+                tool_result = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                if isinstance(tool_result, list):
+                    for r in tool_result:
+                        if isinstance(r, dict) and r.get("document_id"):
+                            sources.append({
+                                "document_id": r.get("document_id"),
+                                "chunk_index": r.get("chunk_index"),
+                                "similarity_score": r.get("similarity_score"),
+                            })
+                elif isinstance(tool_result, dict) and tool_result.get("message"):
+                    # book_demo or get_pricing message — use as output if agent didn't synthesize
+                    if not output or len(output.strip()) < 20:
+                        output = tool_result["message"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    if not output:
+        output = "I'm here to help you learn about Valid. Could you rephrase your question?"
 
     return output, sources

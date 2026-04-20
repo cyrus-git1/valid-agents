@@ -424,6 +424,10 @@ def create_service_tools(
             logger.warning("search_kb failed: %s", e)
             return []
 
+    # Deep analysis tools
+    from app.tools.analysis_tools import create_analysis_tools
+    analysis_tools = create_analysis_tools(tenant_id, client_id)
+
     return [
         ask_question,
         generate_survey,
@@ -436,4 +440,5 @@ def create_service_tools(
         get_summary,
         search_kb,
         check_status,
+        *analysis_tools,
     ]

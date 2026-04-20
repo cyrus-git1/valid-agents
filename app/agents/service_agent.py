@@ -107,6 +107,9 @@ _TOOL_INTENT_MAP: Dict[str, str] = {
     "get_summary": "summary",
     "search_kb": "search",
     "check_status": "status",
+    "analyze_transcript": "transcript_analysis",
+    "competitive_intelligence": "competitive_intel",
+    "cross_document_synthesis": "synthesis",
 }
 
 

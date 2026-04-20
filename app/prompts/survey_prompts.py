@@ -267,23 +267,35 @@ SURVEY_OUTPUT_FORMAT_PROMPT = (
     '  ],\n'
     '  "required": true\n'
     "}}\n\n"
-    "tree_testing:\n"
+    "tree_testing (REQUIRED fields: task, tree, correctPath — do NOT omit these):\n"
     "{{\n"
     '  "id": "<uuid4>", "type": "tree_testing",\n'
-    '  "label": "Find the item",\n'
-    '  "task": "Where would you find account settings?",\n'
+    '  "label": "Navigation findability test",\n'
+    '  "task": "Where would you go to update your billing information?",\n'
     '  "tree": [\n'
-    '    {{"id": "<uuid4>", "label": "Category 1", "children": [\n'
-    '      {{"id": "<uuid4>", "label": "Sub-item 1", "children": []}},\n'
-    '      {{"id": "<uuid4>", "label": "Sub-item 2", "children": []}}\n'
+    '    {{"id": "<uuid4>", "label": "Account & Settings", "children": [\n'
+    '      {{"id": "<uuid4>", "label": "Profile", "children": []}},\n'
+    '      {{"id": "<uuid4>", "label": "Billing & Payments", "children": [\n'
+    '        {{"id": "<uuid4>", "label": "Payment Methods", "children": []}},\n'
+    '        {{"id": "<uuid4>", "label": "Invoices", "children": []}}\n'
+    '      ]}}\n'
     '    ]}},\n'
-    '    {{"id": "<uuid4>", "label": "Category 2", "children": [\n'
-    '      {{"id": "<uuid4>", "label": "Sub-item 3", "children": []}}\n'
+    '    {{"id": "<uuid4>", "label": "Products & Services", "children": [\n'
+    '      {{"id": "<uuid4>", "label": "Pricing Plans", "children": []}},\n'
+    '      {{"id": "<uuid4>", "label": "Add-ons", "children": []}}\n'
+    '    ]}},\n'
+    '    {{"id": "<uuid4>", "label": "Support", "children": [\n'
+    '      {{"id": "<uuid4>", "label": "Help Center", "children": []}},\n'
+    '      {{"id": "<uuid4>", "label": "Contact Us", "children": []}}\n'
     '    ]}}\n'
     '  ],\n'
-    '  "correctPath": [],\n'
+    '  "correctPath": ["<account-settings-uuid>", "<billing-uuid>"],\n'
     '  "required": false\n'
-    "}}\n\n"
+    "}}\n"
+    "CRITICAL for tree_testing: The \"task\", \"tree\", and \"correctPath\" fields are MANDATORY. "
+    "A tree_testing question without a tree structure is INVALID. The tree MUST have "
+    "at least 3 top-level categories with children. Use realistic labels from the "
+    "company's context.\n\n"
     "matrix:\n"
     "{{\n"
     '  "id": "<uuid4>", "type": "matrix",\n'

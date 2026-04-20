@@ -385,7 +385,215 @@ def create_analysis_tools(
 
         return {"status": "failed", "error": "Synthesis failed", "sources_analyzed": len(all_content)}
 
-    return [analyze_transcript, competitive_intelligence, cross_document_synthesis]
+    # ── Customer objections ────────────────────────────────────────────
+
+    @tool
+    def extract_objections(focus: Optional[str] = None) -> Dict[str, Any]:
+        """Extract customer objections, hesitations, and blockers from the KB.
+
+        Distinct from pain points — objections are reasons people HESITATE
+        to buy/adopt/engage (not problems they already have). Returns
+        structured objections with frequency, severity, and quotes.
+
+        Use 'focus' to narrow (e.g., 'pricing objections', 'onboarding blockers').
+        """
+        queries = [
+            "objection hesitation concern reason not buy",
+            "blocker barrier friction stuck confused",
+            "too expensive too complicated not sure worried",
+            focus or "why don't customers buy adopt switch",
+        ]
+        all_content: List[str] = []
+        seen: set = set()
+
+        for q in queries:
+            try:
+                docs = core_client.search_graph(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    query=q,
+                    top_k=10,
+                    hop_limit=1,
+                    boost_pinned=True,
+                    exclude_status=["archived", "deprecated"],
+                )
+                for d in docs:
+                    nid = d.metadata.get("node_id")
+                    if nid and nid not in seen:
+                        seen.add(nid)
+                        all_content.append(d.page_content)
+            except Exception:
+                pass
+
+        if not all_content:
+            return {"status": "no_data", "message": "No content found for objection analysis."}
+
+        context = "\n\n---\n\n".join(
+            f"[Excerpt {i+1}]\n{c}" for i, c in enumerate(all_content[:20])
+        )
+
+        focus_instruction = f"Focus on: {focus}\n" if focus else ""
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "You are a sales research analyst. Extract customer objections, "
+                "hesitations, and blockers from the sources. Distinguish these from "
+                "pain points (existing problems) — objections are REASONS people "
+                "HESITATE to adopt, buy, or engage.\n\n"
+                "Return JSON:\n"
+                "{{\n"
+                '  "objections": [\n'
+                '    {{"objection": "...", "category": "price/trust/fit/complexity/timing/authority", '
+                '"severity": "high/medium/low", "frequency": "number of mentions", '
+                '"evidence": "direct quote", "how_to_address": "suggested response"}}\n'
+                "  ],\n"
+                '  "top_blocker": "the single biggest adoption blocker",\n'
+                '  "patterns": ["..."]\n'
+                "}}\n\n"
+                "Rules:\n"
+                "- Only include objections explicitly stated or strongly implied\n"
+                "- Every objection MUST have a direct quote as evidence\n"
+                "- Categorize by the type of hesitation\n"
+                "- Skip this if no real objections exist — don't invent them",
+            ),
+            ("human", "{focus}Sources:\n\n{context}"),
+        ])
+
+        llm = get_llm("context_analysis")
+        chain = prompt | llm | StrOutputParser()
+
+        try:
+            raw = chain.invoke({"focus": focus_instruction, "context": context})
+            result = _parse_json(raw)
+            if result:
+                result["status"] = "complete"
+                result["sources_analyzed"] = len(all_content)
+                return result
+        except Exception as e:
+            logger.warning("extract_objections failed: %s", e)
+
+        return {"status": "failed", "error": "Analysis failed"}
+
+    # ── Hypotheses to test ─────────────────────────────────────────────
+
+    @tool
+    def generate_hypotheses(focus: Optional[str] = None) -> Dict[str, Any]:
+        """Generate research hypotheses to test based on KB evidence.
+
+        Looks at convergent themes, contradictions, and blind spots to
+        suggest specific things worth validating — with proposed survey
+        questions. Useful for planning the next research cycle.
+
+        Use 'focus' to narrow (e.g., 'pricing hypotheses', 'messaging tests').
+        """
+        # Gather diverse evidence
+        queries = [
+            "assumption belief hypothesis what we think",
+            "unclear uncertain might may could possibly",
+            "customer expects wants needs prefers",
+            focus or "decisions to validate questions to answer",
+        ]
+        all_content: List[str] = []
+        seen: set = set()
+
+        for q in queries:
+            try:
+                docs = core_client.search_graph(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    query=q,
+                    top_k=8,
+                    hop_limit=1,
+                    boost_pinned=True,
+                    exclude_status=["archived", "deprecated"],
+                )
+                for d in docs:
+                    nid = d.metadata.get("node_id")
+                    if nid and nid not in seen:
+                        seen.add(nid)
+                        all_content.append(d.page_content)
+            except Exception:
+                pass
+
+        # Pull context summary for positioning
+        context_summary = ""
+        try:
+            summary = core_client.get_context_summary(
+                tenant_id=tenant_id,
+                client_id=client_id,
+            )
+            if summary:
+                context_summary = f"Business Context:\n{summary.get('summary', '')}\n\n"
+        except Exception:
+            pass
+
+        if not all_content and not context_summary:
+            return {"status": "no_data", "message": "Not enough data to generate hypotheses."}
+
+        context = "\n\n---\n\n".join(
+            f"[Source {i+1}]\n{c}" for i, c in enumerate(all_content[:20])
+        )
+
+        focus_instruction = f"Focus on: {focus}\n" if focus else ""
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "You are a research strategist. Based on the KB evidence, generate "
+                "specific hypotheses worth testing in the next research cycle. "
+                "Each hypothesis should be testable, specific, and tied to a business "
+                "decision.\n\n"
+                "Return JSON:\n"
+                "{{\n"
+                '  "hypotheses": [\n'
+                '    {{\n'
+                '      "hypothesis": "If X, then Y because Z",\n'
+                '      "category": "pricing/messaging/feature/positioning/segment",\n'
+                '      "why_test_this": "what decision this unlocks",\n'
+                '      "evidence_supporting": "quote or finding that motivated this",\n'
+                '      "suggested_questions": ["survey question 1", "survey question 2"],\n'
+                '      "priority": "high/medium/low",\n'
+                '      "expected_effort": "quick (1 survey) / medium / deep"\n'
+                '    }}\n'
+                "  ],\n"
+                '  "top_hypothesis": "the single most valuable thing to validate next"\n'
+                "}}\n\n"
+                "Rules:\n"
+                "- Each hypothesis MUST be a specific, falsifiable statement\n"
+                "- Every hypothesis must tie to evidence in the sources\n"
+                "- Suggested questions must be concrete, not abstract\n"
+                "- Prioritize hypotheses that unlock big decisions\n"
+                "- 3-6 hypotheses is ideal — don't pad with weak ones",
+            ),
+            ("human", "{context_summary}{focus}Sources:\n\n{context}"),
+        ])
+
+        llm = get_llm("context_analysis")
+        chain = prompt | llm | StrOutputParser()
+
+        try:
+            raw = chain.invoke({
+                "context_summary": context_summary,
+                "focus": focus_instruction,
+                "context": context,
+            })
+            result = _parse_json(raw)
+            if result:
+                result["status"] = "complete"
+                return result
+        except Exception as e:
+            logger.warning("generate_hypotheses failed: %s", e)
+
+        return {"status": "failed", "error": "Analysis failed"}
+
+    return [
+        analyze_transcript,
+        competitive_intelligence,
+        cross_document_synthesis,
+        extract_objections,
+        generate_hypotheses,
+    ]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

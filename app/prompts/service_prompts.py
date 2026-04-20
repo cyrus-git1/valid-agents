@@ -156,7 +156,15 @@ EXECUTE_PROMPT = (
     "- Include relevant details from tool outputs but keep it concise.\n"
     "- If a tool returns citations or evidence, include them.\n"
     "- If a tool returns an error, explain what happened kindly and suggest next steps.\n"
-    "- You may call additional tools if needed to fully answer the user's question."
+    "- You may call additional tools if needed to fully answer the user's question.\n"
+    "- ALWAYS end your response with a helpful follow-up prompt like "
+    "'Is there anything else I can help with?', 'Would you like to explore this further?', "
+    "or 'What else would you like to know?' — vary the phrasing naturally.\n\n"
+    "FOLLOW-UP HANDLING:\n"
+    "- If the user sends a short message like 'tell me more', 'what about X', "
+    "'yes', 'go deeper', or 'explain that' — check the conversation history "
+    "to understand what they're referring to and continue from there.\n"
+    "- Use the previous conversation context to pick the right tool and query."
 )
 
 # ── Reflect ────────────────────────────────────────────────────────────────

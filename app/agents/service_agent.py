@@ -329,7 +329,7 @@ def _handle_conversation(request: str) -> Dict[str, Any]:
         output = chain.invoke({"request": request})
     except Exception as e:
         logger.warning("Conversation response failed: %s", e)
-        output = "Hey there! How can I help you today?"
+        output = "Hey there! I'm Vera, your research assistant. How can I help you today?"
 
     return {
         "intent": "conversation",

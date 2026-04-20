@@ -1,12 +1,15 @@
 """
-/insights router — business insights report generation.
+/insights router — deep analysis endpoints.
+
+POST /insights/analyze   — Evidence-backed Q&A over KB
+POST /insights/generate  — Deep analysis (transcript, competitive, cross-doc synthesis)
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from uuid import UUID
 
@@ -17,35 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/insights", tags=["insights"])
 
 
-class InsightsGenerateRequest(TenantScopedRequest):
-    focus_query: Optional[str] = Field(
-        default=None,
-        description="Optional focus for the analysis (e.g., 'pricing concerns')",
-    )
-
-
-@router.post("/generate")
-def generate_insights(req: InsightsGenerateRequest):
-    """Generate a full business insights report.
-
-    The agent checks what data exists (transcripts, surveys, documents, personas),
-    runs relevant analyses, and produces a unified report with evidence attribution.
-    Never blocks on missing data — reports what's missing and continues.
-    """
-    from app.agents.insights_agent import run_insights_agent
-
-    try:
-        result = run_insights_agent(
-            tenant_id=str(req.tenant_id),
-            client_id=str(req.client_id),
-            client_profile=req.client_profile,
-            focus_query=req.focus_query,
-        )
-    except Exception as e:
-        logger.exception("Insights generation failed")
-        raise HTTPException(status_code=500, detail=f"Insights generation failed: {e}")
-
-    return result
+# ── Evidence-backed Q&A ───────────────────────────────────────────────────
 
 
 class InsightAnalyzeRequest(BaseModel):
@@ -61,8 +36,7 @@ def analyze_insight(req: InsightAnalyzeRequest):
 
     Retrieves via hop-1 from summary chunks (which mention-edge back to their
     source evidence), then synthesizes an answer whose every factual claim
-    cites a SOURCE chunk. Summaries are navigation only — they are never used
-    as the citation target.
+    cites a SOURCE chunk.
     """
     from app.workflows.insight_workflow import run_insight_analysis
 
@@ -78,3 +52,73 @@ def analyze_insight(req: InsightAnalyzeRequest):
         raise HTTPException(status_code=500, detail=f"Insight analysis failed: {e}")
 
     return result
+
+
+# ── Deep analysis ─────────────────────────────────────────────────────────
+
+
+class InsightsGenerateRequest(TenantScopedRequest):
+    focus: Optional[str] = Field(
+        default=None,
+        description="Optional focus for the analysis (e.g., 'pricing concerns', 'competitor X')",
+    )
+    analyses: List[str] = Field(
+        default=["transcript", "competitive", "synthesis"],
+        description="Which analyses to run: 'transcript', 'competitive', 'synthesis'. Defaults to all.",
+    )
+
+
+@router.post("/generate")
+def generate_insights(req: InsightsGenerateRequest):
+    """Run deep analysis across the knowledge base.
+
+    Combines up to three analysis types:
+    - transcript: summary + sentiment + insights from transcript/interview data
+    - competitive: competitor profiles, positioning gaps, win/loss signals
+    - synthesis: cross-document patterns, contradictions, blind spots
+
+    Each analysis searches the KB independently and returns structured results.
+    """
+    from app.tools.analysis_tools import create_analysis_tools
+
+    tools = create_analysis_tools(str(req.tenant_id), str(req.client_id))
+    tool_map = {t.name: t for t in tools}
+
+    valid_analyses = {"transcript", "competitive", "synthesis"}
+    requested = [a for a in req.analyses if a in valid_analyses]
+    if not requested:
+        requested = list(valid_analyses)
+
+    tool_name_map = {
+        "transcript": "analyze_transcript",
+        "competitive": "competitive_intelligence",
+        "synthesis": "cross_document_synthesis",
+    }
+
+    results: Dict[str, Any] = {}
+    errors: List[str] = []
+
+    for analysis in requested:
+        tool_name = tool_name_map[analysis]
+        tool_fn = tool_map.get(tool_name)
+        if not tool_fn:
+            errors.append(f"Tool {tool_name} not found")
+            continue
+
+        try:
+            result = tool_fn.invoke({"focus": req.focus})
+            results[analysis] = result
+        except Exception as e:
+            logger.warning("Analysis %s failed: %s", analysis, e)
+            results[analysis] = {"status": "failed", "error": str(e)}
+            errors.append(f"{analysis}: {e}")
+
+    return {
+        "tenant_id": str(req.tenant_id),
+        "client_id": str(req.client_id),
+        "focus": req.focus,
+        "analyses_requested": requested,
+        "results": results,
+        "errors": errors,
+        "status": "complete" if not errors else "partial",
+    }

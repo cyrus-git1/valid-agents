@@ -172,6 +172,24 @@ def create_service_tools(
                 title=title,
             )
             result = IngestService().ingest(inp)
+
+            # Detect failure: 0 chunks means scraper/ingest failed
+            if result.chunks_upserted == 0:
+                warning_summary = "; ".join(result.warnings) if result.warnings else "Unknown reason"
+                return {
+                    "status": "failed",
+                    "source_uri": url,
+                    "chunks_upserted": 0,
+                    "warnings": result.warnings,
+                    "message": (
+                        f"Ingest failed for {url} — 0 content chunks stored. "
+                        f"Reason: {warning_summary}. "
+                        "This usually means the URL is unreachable (404), blocked by bot protection, "
+                        "or requires JavaScript rendering the scraper can't handle. "
+                        "Try a different URL or check that the page is publicly accessible."
+                    ),
+                }
+
             return {
                 "document_id": str(result.document_id),
                 "source_uri": url,

@@ -389,14 +389,35 @@ def create_analysis_tools(
 
     @tool
     def extract_objections(focus: Optional[str] = None) -> Dict[str, Any]:
-        """Extract customer objections, hesitations, and blockers from the KB.
+        """Extract customer objections, hesitations, and blockers from transcripts.
 
-        Distinct from pain points — objections are reasons people HESITATE
-        to buy/adopt/engage (not problems they already have). Returns
-        structured objections with frequency, severity, and quotes.
+        ONLY analyzes transcript/interview content — objections from real
+        customer conversations, not marketing copy or decks. If no transcripts
+        are in the KB, returns a skip message. Distinct from pain points:
+        objections are reasons people HESITATE (not problems they have).
 
         Use 'focus' to narrow (e.g., 'pricing objections', 'onboarding blockers').
         """
+        # First check if any transcripts exist at all — skip if not
+        try:
+            transcript_count = core_client.count_transcripts(
+                tenant_id=tenant_id, client_id=client_id,
+            )
+        except Exception:
+            transcript_count = 0
+
+        if transcript_count == 0:
+            return {
+                "status": "skipped",
+                "message": (
+                    "No transcripts or interviews in the knowledge base. "
+                    "Objection analysis requires real customer conversations — "
+                    "ingest VTT transcripts or interview recordings to enable this."
+                ),
+                "objections": [],
+            }
+
+        # Pull transcript chunks only — restricted to VideoTranscript node type
         queries = [
             "objection hesitation concern reason not buy",
             "blocker barrier friction stuck confused",
@@ -414,6 +435,7 @@ def create_analysis_tools(
                     query=q,
                     top_k=10,
                     hop_limit=1,
+                    node_types=["VideoTranscript"],  # transcripts only
                     boost_pinned=True,
                     exclude_status=["archived", "deprecated"],
                 )
@@ -425,8 +447,26 @@ def create_analysis_tools(
             except Exception:
                 pass
 
+        # Fallback: pull transcript chunks via get_transcript_chunks if search
+        # didn't find VideoTranscript nodes (may differ in KG labeling)
         if not all_content:
-            return {"status": "no_data", "message": "No content found for objection analysis."}
+            try:
+                transcript_chunks = core_client.get_transcript_chunks(
+                    tenant_id=tenant_id, client_id=client_id, limit=30,
+                )
+                for c in transcript_chunks:
+                    text = c.get("content") or c.get("text", "")
+                    if text:
+                        all_content.append(text)
+            except Exception:
+                pass
+
+        if not all_content:
+            return {
+                "status": "skipped",
+                "message": "No transcript content retrieved from the knowledge base.",
+                "objections": [],
+            }
 
         context = "\n\n---\n\n".join(
             f"[Excerpt {i+1}]\n{c}" for i, c in enumerate(all_content[:20])

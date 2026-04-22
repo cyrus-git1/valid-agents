@@ -141,24 +141,42 @@ QUESTION_TYPE_PROMPTS: Dict[str, str] = {
         "organize information and for gathering categorization data\n"
     ),
     "tree_testing": (
-        "For tree_testing questions:\n"
-        "- Provide a \"task\" string that tells the respondent what to find "
-        "(e.g., \"Where would you find account settings?\")\n"
-        "- Provide a \"tree\" as a nested array of nodes. Each node has \"id\" (UUID4), "
-        "\"label\", and \"children\" (array of child nodes, may be empty)\n"
-        "- Build a realistic information-architecture tree with 2-4 top-level categories "
-        "and 1-3 levels of nesting\n"
-        "- CRITICAL: Tree node labels MUST use the company's actual products, services, "
-        "features, and terminology from the knowledge base context. Do NOT invent generic "
-        "labels like 'Products' or 'Services'. Use specific names from the context "
-        "(e.g., if the context mentions 'Pricing Intelligence' and 'Dynamic Surveys', "
-        "use those as tree labels)\n"
-        "- The task should reference a real feature or page that exists in the context\n"
-        "- Optionally provide \"correctPath\" as an array of node IDs tracing the ideal "
-        "path from root to the correct answer (may be empty if there is no single correct answer)\n"
-        "- Use tree_testing when you want to evaluate how easily users can navigate "
-        "a hierarchy to locate information — ideal for testing site navigation, menu "
-        "structures, or content organization\n"
+        "For tree_testing questions (a tree test tests findability in an "
+        "information architecture — the respondent is given a task and must "
+        "click through the tree to find where they'd look):\n\n"
+        "REQUIRED STRUCTURE:\n"
+        "- \"label\": short label for the question itself (NOT the tree). "
+        "Describes what you're testing (e.g., \"Pricing page findability\").\n"
+        "- \"task\": a SPECIFIC, realistic user scenario written as a task. "
+        "First-person or action-oriented. Bad: 'find the pricing page'. "
+        "Good: 'You want to understand how much Valid costs for a team of "
+        "5 before committing. Where would you click to find this?'\n"
+        "- \"tree\": nested array of nodes. MUST have AT LEAST 4 top-level "
+        "categories and MUST have 2-3 levels of nesting (parents with "
+        "children, some children with grandchildren). A flat tree with no "
+        "nesting is INVALID — you're testing navigation, not a menu list.\n"
+        "- \"correctPath\": array of node IDs from root to the target leaf. "
+        "REQUIRED — a tree test without a correct answer cannot be scored. "
+        "The IDs must match actual IDs in your tree.\n\n"
+        "QUALITY RULES (critical for a useful tree test):\n"
+        "- Every node needs a unique UUID4 as its \"id\"\n"
+        "- Each node has \"id\", \"label\", \"children\" (array, may be empty)\n"
+        "- Tree SIZE: 12-25 total nodes is ideal. Too few = not a real test. "
+        "Too many = respondent fatigue.\n"
+        "- LABELS must be SPECIFIC to the company. If the KB mentions "
+        "'Pricing Intelligence', 'Dynamic Surveys', 'Panel Services', use "
+        "those exact terms. NEVER use generic labels like 'Category 1', "
+        "'Products', 'Services', 'Section A', 'Item 1'.\n"
+        "- Include INTENTIONAL DISTRACTORS: plausible-wrong paths the "
+        "respondent might click (e.g., if testing 'find pricing', include "
+        "an 'Account > Billing' branch as a distractor alongside the "
+        "correct 'Pricing Plans' branch).\n"
+        "- Mirror a REAL site structure: account, products, support, "
+        "resources, pricing, etc. — but customized to this company.\n"
+        "- The task should have ONE correct answer in the tree. Don't "
+        "create ambiguous tasks that could map to multiple branches.\n\n"
+        "Use tree_testing for: navigation audits, IA redesigns, menu "
+        "structure validation, content findability testing.\n"
     ),
     "matrix": (
         "For matrix questions:\n"
@@ -267,35 +285,50 @@ SURVEY_OUTPUT_FORMAT_PROMPT = (
     '  ],\n'
     '  "required": true\n'
     "}}\n\n"
-    "tree_testing (REQUIRED fields: task, tree, correctPath — do NOT omit these):\n"
+    "tree_testing — ALL fields (task, tree, correctPath) are MANDATORY. Tree "
+    "MUST have 4+ top-level categories, 2-3 levels of nesting, and 12-25 total "
+    "nodes. EVERY label must be specific to the company (NOT 'Category 1').\n"
     "{{\n"
     '  "id": "<uuid4>", "type": "tree_testing",\n'
-    '  "label": "Navigation findability test",\n'
-    '  "task": "Where would you go to update your billing information?",\n'
+    '  "label": "Pricing findability test",\n'
+    '  "task": "You are a product manager at a 20-person SaaS startup and need '
+    'to find out how much Valid costs for your team before requesting budget. '
+    'Where would you click to get this information?",\n'
     '  "tree": [\n'
-    '    {{"id": "<uuid4>", "label": "Account & Settings", "children": [\n'
-    '      {{"id": "<uuid4>", "label": "Profile", "children": []}},\n'
-    '      {{"id": "<uuid4>", "label": "Billing & Payments", "children": [\n'
-    '        {{"id": "<uuid4>", "label": "Payment Methods", "children": []}},\n'
-    '        {{"id": "<uuid4>", "label": "Invoices", "children": []}}\n'
-    '      ]}}\n'
+    '    {{"id": "p1", "label": "Platform", "children": [\n'
+    '      {{"id": "p1a", "label": "Dynamic Surveys", "children": []}},\n'
+    '      {{"id": "p1b", "label": "AI Insights Engine", "children": []}},\n'
+    '      {{"id": "p1c", "label": "Pre-vetted Panel", "children": []}}\n'
     '    ]}},\n'
-    '    {{"id": "<uuid4>", "label": "Products & Services", "children": [\n'
-    '      {{"id": "<uuid4>", "label": "Pricing Plans", "children": []}},\n'
-    '      {{"id": "<uuid4>", "label": "Add-ons", "children": []}}\n'
+    '    {{"id": "p2", "label": "Pricing & Plans", "children": [\n'
+    '      {{"id": "p2a", "label": "Startup Plan", "children": []}},\n'
+    '      {{"id": "p2b", "label": "Growth Plan", "children": []}},\n'
+    '      {{"id": "p2c", "label": "Enterprise", "children": []}},\n'
+    '      {{"id": "p2d", "label": "Compare Plans", "children": []}}\n'
     '    ]}},\n'
-    '    {{"id": "<uuid4>", "label": "Support", "children": [\n'
-    '      {{"id": "<uuid4>", "label": "Help Center", "children": []}},\n'
-    '      {{"id": "<uuid4>", "label": "Contact Us", "children": []}}\n'
+    '    {{"id": "p3", "label": "Use Cases", "children": [\n'
+    '      {{"id": "p3a", "label": "Product Validation", "children": []}},\n'
+    '      {{"id": "p3b", "label": "Messaging Testing", "children": []}},\n'
+    '      {{"id": "p3c", "label": "Persona Research", "children": []}}\n'
+    '    ]}},\n'
+    '    {{"id": "p4", "label": "Resources", "children": [\n'
+    '      {{"id": "p4a", "label": "Case Studies", "children": []}},\n'
+    '      {{"id": "p4b", "label": "Research Templates", "children": []}},\n'
+    '      {{"id": "p4c", "label": "Blog", "children": []}}\n'
+    '    ]}},\n'
+    '    {{"id": "p5", "label": "Account", "children": [\n'
+    '      {{"id": "p5a", "label": "Profile", "children": []}},\n'
+    '      {{"id": "p5b", "label": "Billing", "children": []}},\n'
+    '      {{"id": "p5c", "label": "Team Members", "children": []}}\n'
     '    ]}}\n'
     '  ],\n'
-    '  "correctPath": ["<account-settings-uuid>", "<billing-uuid>"],\n'
+    '  "correctPath": ["p2", "p2d"],\n'
     '  "required": false\n'
     "}}\n"
-    "CRITICAL for tree_testing: The \"task\", \"tree\", and \"correctPath\" fields are MANDATORY. "
-    "A tree_testing question without a tree structure is INVALID. The tree MUST have "
-    "at least 3 top-level categories with children. Use realistic labels from the "
-    "company's context.\n\n"
+    "Note: use real UUID4s for every id (the example uses p1/p1a only for "
+    "readability). correctPath MUST reference actual ids that appear in your "
+    "tree. Include 'Billing' under Account as a DISTRACTOR — it tests whether "
+    "respondents confuse invoice access with public pricing pages.\n\n"
     "matrix:\n"
     "{{\n"
     '  "id": "<uuid4>", "type": "matrix",\n'

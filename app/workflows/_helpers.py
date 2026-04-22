@@ -130,16 +130,42 @@ def is_valid_uuid(val: Any) -> bool:
 
 
 def normalize_tree_nodes(nodes: list) -> list:
+    """Recursively normalize tree nodes: ensure UUID4 ids, preserve structure.
+
+    Drops empty-label nodes (which are usually placeholder junk).
+    """
     normalized = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
+        label = (node.get("label") or "").strip()
+        if not label:
+            # skip placeholder nodes with no label
+            continue
         normalized.append({
             "id": node.get("id") if is_valid_uuid(node.get("id")) else str(uuid.uuid4()),
-            "label": node.get("label", ""),
+            "label": label,
             "children": normalize_tree_nodes(node.get("children", [])),
         })
     return normalized
+
+
+def _count_tree_nodes(nodes: list) -> int:
+    """Total node count across all depths of a tree."""
+    total = 0
+    for n in nodes or []:
+        if isinstance(n, dict):
+            total += 1
+            total += _count_tree_nodes(n.get("children", []))
+    return total
+
+
+def _tree_has_nesting(nodes: list) -> bool:
+    """True if any node has children (i.e., tree isn't flat)."""
+    for n in nodes or []:
+        if isinstance(n, dict) and n.get("children"):
+            return True
+    return False
 
 
 def normalize_question(q: dict) -> dict:
@@ -163,9 +189,30 @@ def normalize_question(q: dict) -> dict:
         base["items"] = [{"id": it.get("id") if is_valid_uuid(it.get("id")) else str(uuid.uuid4()), "label": it.get("label", "")} for it in q.get("items", [])]
         base["categories"] = [{"id": cat.get("id") if is_valid_uuid(cat.get("id")) else str(uuid.uuid4()), "label": cat.get("label", "")} for cat in q.get("categories", [])]
     elif qtype == "tree_testing":
-        base["task"] = q.get("task", "")
-        base["tree"] = normalize_tree_nodes(q.get("tree", []))
+        tree = normalize_tree_nodes(q.get("tree", []))
+        base["task"] = (q.get("task") or "").strip()
+        base["tree"] = tree
         base["correctPath"] = q.get("correctPath", [])
+
+        # Quality warnings — surfaced via base["_warnings"] so the caller
+        # can log or retry if the LLM produced a shallow/empty tree.
+        warnings: List[str] = []
+        node_count = _count_tree_nodes(tree)
+        top_level = len(tree)
+        if not tree:
+            warnings.append("tree is empty")
+        elif top_level < 3:
+            warnings.append(f"tree has only {top_level} top-level categories (min 3)")
+        elif node_count < 8:
+            warnings.append(f"tree has only {node_count} total nodes (min 8 for a useful test)")
+        elif not _tree_has_nesting(tree):
+            warnings.append("tree is flat (no nested children) — not a real IA test")
+        if not base["task"]:
+            warnings.append("task is empty — tree test needs a user scenario")
+        if not base["correctPath"]:
+            warnings.append("correctPath is empty — test cannot be scored")
+        if warnings:
+            base["_warnings"] = warnings
     elif qtype == "matrix":
         base["rows"] = q.get("rows", [])
         base["columns"] = q.get("columns", [])

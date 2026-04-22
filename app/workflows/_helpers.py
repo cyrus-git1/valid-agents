@@ -129,10 +129,11 @@ def is_valid_uuid(val: Any) -> bool:
         return False
 
 
-def normalize_tree_nodes(nodes: list) -> list:
+def normalize_tree_nodes(nodes: list, drop_placeholders: bool = True) -> list:
     """Recursively normalize tree nodes: ensure UUID4 ids, preserve structure.
 
-    Drops empty-label nodes (which are usually placeholder junk).
+    Drops empty-label nodes and (when drop_placeholders is True) generic
+    placeholder labels like 'Sub option 1' or 'Category 2'.
     """
     normalized = []
     for node in nodes:
@@ -140,12 +141,16 @@ def normalize_tree_nodes(nodes: list) -> list:
             continue
         label = (node.get("label") or "").strip()
         if not label:
-            # skip placeholder nodes with no label
+            continue
+        if drop_placeholders and _is_placeholder_label(label):
+            # recurse into children in case they have real labels,
+            # but drop this placeholder parent and lift its children up
+            normalized.extend(normalize_tree_nodes(node.get("children", []), drop_placeholders))
             continue
         normalized.append({
             "id": node.get("id") if is_valid_uuid(node.get("id")) else str(uuid.uuid4()),
             "label": label,
-            "children": normalize_tree_nodes(node.get("children", [])),
+            "children": normalize_tree_nodes(node.get("children", []), drop_placeholders),
         })
     return normalized
 
@@ -166,6 +171,45 @@ def _tree_has_nesting(nodes: list) -> bool:
         if isinstance(n, dict) and n.get("children"):
             return True
     return False
+
+
+# Placeholder patterns that indicate the LLM produced generic junk
+# instead of company-specific labels
+_PLACEHOLDER_PATTERNS = [
+    re.compile(r"^sub[\s\-]?option(\s+\d+)?$", re.I),
+    re.compile(r"^sub[\s\-]?item(\s+\d+)?$", re.I),
+    re.compile(r"^sub[\s\-]?category(\s+\d+)?$", re.I),
+    re.compile(r"^option\s+\d+$", re.I),
+    re.compile(r"^item\s+\d+$", re.I),
+    re.compile(r"^category\s+\d+$", re.I),
+    re.compile(r"^section\s+[a-z0-9]+$", re.I),
+    re.compile(r"^child\s+\d+$", re.I),
+    re.compile(r"^placeholder", re.I),
+    re.compile(r"^example\s+\d+$", re.I),
+    re.compile(r"^feature\s+[a-z]$", re.I),
+    re.compile(r"^product\s+\d+$", re.I),
+    re.compile(r"^service\s+[a-z]$", re.I),
+    re.compile(r"^node\s+\d+$", re.I),
+]
+
+
+def _is_placeholder_label(label: str) -> bool:
+    """True if the label looks like a generic placeholder (e.g. 'Sub option 1')."""
+    if not label:
+        return True
+    s = label.strip()
+    return any(p.match(s) for p in _PLACEHOLDER_PATTERNS)
+
+
+def _count_placeholder_labels(nodes: list) -> int:
+    """Count placeholder-label nodes anywhere in the tree."""
+    total = 0
+    for n in nodes or []:
+        if isinstance(n, dict):
+            if _is_placeholder_label(n.get("label", "")):
+                total += 1
+            total += _count_placeholder_labels(n.get("children", []))
+    return total
 
 
 def normalize_question(q: dict) -> dict:
@@ -199,6 +243,15 @@ def normalize_question(q: dict) -> dict:
         warnings: List[str] = []
         node_count = _count_tree_nodes(tree)
         top_level = len(tree)
+        # Count placeholders on the RAW tree (before dropping) to surface
+        # that the LLM produced junk
+        raw_tree = q.get("tree", [])
+        placeholder_count = _count_placeholder_labels(raw_tree)
+        if placeholder_count:
+            warnings.append(
+                f"tree had {placeholder_count} placeholder label(s) (e.g. 'Sub option') "
+                "— dropped during normalization"
+            )
         if not tree:
             warnings.append("tree is empty")
         elif top_level < 3:

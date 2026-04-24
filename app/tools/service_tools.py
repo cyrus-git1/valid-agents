@@ -97,6 +97,63 @@ def create_service_tools(
             return {"error": str(e), "status": "failed", "survey": "[]"}
 
     @tool
+    def extend_survey(
+        original_request: str,
+        existing_questions: List[Dict[str, Any]],
+        count: int = 3,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Add N more questions to an existing survey using the ORIGINAL prompt.
+
+        Uses the same KB context that generated the original survey so new
+        questions stay in scope. Call this when the user says 'add more
+        questions', 'give me 5 more', 'extend this survey', or similar.
+
+        - original_request: the prompt that was used to create the survey
+        - existing_questions: list of questions already in the survey
+          (dicts with at minimum 'type' and 'label')
+        - count: number of new questions to add (default 3, max 20)
+        - title / description: optional survey metadata for scope
+        """
+        try:
+            from app.workflows.extend_workflow import extend_survey as extend_fn
+            result = extend_fn(
+                request=original_request,
+                existing_questions=existing_questions or [],
+                tenant_id=tenant_id,
+                client_id=client_id,
+                client_profile=client_profile,
+                count=count,
+                title=title,
+                description=description,
+            )
+            # Persist so future calls see these in prior_survey_outputs
+            questions = result.get("questions", [])
+            if questions:
+                try:
+                    core_client.save_survey_output(
+                        tenant_id=tenant_id,
+                        client_id=client_id,
+                        output_type="extension",
+                        request=original_request,
+                        questions=questions,
+                        reasoning=result.get("reasoning"),
+                    )
+                except Exception:
+                    logger.warning("Failed to persist extend output", exc_info=True)
+            return {
+                "new_questions": questions,
+                "reasoning": result.get("reasoning", ""),
+                "original_request": original_request,
+                "status": result.get("status", "complete"),
+                "error": result.get("error"),
+            }
+        except Exception as e:
+            logger.warning("extend_survey tool failed: %s", e)
+            return {"error": str(e), "status": "failed", "new_questions": []}
+
+    @tool
     def find_personas(request: Optional[str] = None) -> Dict[str, Any]:
         """Discover audience personas from KB data.
 
@@ -449,6 +506,7 @@ def create_service_tools(
     return [
         ask_question,
         generate_survey,
+        extend_survey,
         find_personas,
         enrich_kb,
         ingest_url,

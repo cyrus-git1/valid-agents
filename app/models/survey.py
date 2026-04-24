@@ -104,6 +104,41 @@ class GenerateQuestionResponse(StatusResponse):
     )
 
 
+# ── Extend survey ────────────────────────────────────────────────────────────
+
+
+class ExtendSurveyRequest(TenantScopedRequest):
+    """Add N more questions to an existing survey using the same original prompt and context."""
+    request: str = Field(
+        ..., description="The ORIGINAL survey prompt/goal that was submitted previously"
+    )
+    existing_questions: List[SurveyQuestionItem] = Field(
+        default_factory=list,
+        description="Questions already in the survey — new ones will not duplicate these",
+    )
+    count: int = Field(default=3, ge=1, le=20, description="How many new questions to add")
+    question_types: List[str] = Field(
+        default=ALL_QUESTION_TYPES,
+        description="Allowed question types for new questions",
+    )
+    title: Optional[str] = Field(default=None, description="Optional survey title (for scope)")
+    description: Optional[str] = Field(default=None, description="Optional survey description")
+
+
+class ExtendSurveyResponse(StatusResponse):
+    questions: List[SurveyQuestionItem] = Field(
+        default_factory=list,
+        description="The N new questions added (NOT the full survey)",
+    )
+    reasoning: str = Field(
+        default="", description="Why these questions were chosen"
+    )
+    original_request: str = Field(
+        default="",
+        description="Echoes the original prompt used to generate context",
+    )
+
+
 # ── Generate follow-up survey ────────────────────────────────────────────────
 
 

@@ -98,6 +98,7 @@ def _format_history(history: Optional[List[Dict[str, str]]]) -> str:
 _TOOL_INTENT_MAP: Dict[str, str] = {
     "ask_question": "retrieval",
     "generate_survey": "survey",
+    "extend_survey": "survey_extend",
     "find_personas": "persona",
     "enrich_kb": "enrich",
     "ingest_url": "ingest",

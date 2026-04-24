@@ -19,6 +19,7 @@ from app.models.base import StatusResponse, TenantScopedRequest
 from app.models.persona import PersonaDemographics, PersonaFindRequest, PersonaFindResponse, PersonaItem
 from app.models.enrichment import EnrichmentGap, EnrichmentRunRequest, EnrichmentRunResponse, EnrichmentSource
 from app.models.survey import (
+    ExtendSurveyRequest, ExtendSurveyResponse,
     GenerateDescriptionRequest, GenerateDescriptionResponse,
     GenerateFollowUpRequest, GenerateFollowUpResponse,
     GenerateQuestionRequest, GenerateQuestionResponse,
@@ -263,6 +264,55 @@ def survey_generate_question(req: GenerateQuestionRequest) -> GenerateQuestionRe
         logger.warning("Failed to persist recommendation output", exc_info=True)
     return GenerateQuestionResponse(recommendations=_parse_questions(result.get("recommendations", [])),
                                      reasoning=result.get("reasoning", ""), status=result.get("status", "complete"), error=result.get("error"))
+
+
+@survey_router.post("/extend", response_model=ExtendSurveyResponse)
+def survey_extend(req: ExtendSurveyRequest) -> ExtendSurveyResponse:
+    """Add N new questions to an existing survey using the ORIGINAL prompt + same KB context.
+
+    Unlike /generate-question (which recommends questions as suggestions), this
+    is specifically for extending a survey that was generated from a specific
+    prompt — it re-uses the same KB retrieval that the original generation ran
+    so the new questions sit in the same context.
+    """
+    from app.workflows.extend_workflow import extend_survey
+    existing_dicts = [q.model_dump(exclude_none=True) for q in req.existing_questions]
+    try:
+        result = extend_survey(
+            request=req.request,
+            existing_questions=existing_dicts,
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            client_profile=req.client_profile,
+            question_types=req.question_types,
+            count=req.count,
+            title=req.title,
+            description=req.description,
+        )
+    except Exception as e:
+        logger.exception("Survey extend failed")
+        raise HTTPException(status_code=500, detail=f"Survey extend failed: {e}")
+
+    # Persist the generated questions so they show up in prior_survey_outputs
+    try:
+        core_client.save_survey_output(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            output_type="extension",
+            request=req.request,
+            questions=result.get("questions", []),
+            reasoning=result.get("reasoning"),
+        )
+    except Exception:
+        logger.warning("Failed to persist extend output", exc_info=True)
+
+    return ExtendSurveyResponse(
+        questions=_parse_questions(result.get("questions", [])),
+        reasoning=result.get("reasoning", ""),
+        original_request=result.get("original_request", req.request),
+        status=result.get("status", "complete"),
+        error=result.get("error"),
+    )
 
 
 @survey_router.post("/generate-follow-up", response_model=GenerateFollowUpResponse)

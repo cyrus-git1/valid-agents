@@ -2,18 +2,13 @@
 Intake agent — Vera runs an 8-stage context intake conversation for users
 with no existing documentation.
 
-At the end of the conversation, produces a structured profile and ingests
-it as a document in the user's KB so downstream agents have context.
+Anonymous-friendly: tenant_id and client_id are OPTIONAL. If omitted, the
+profile is held in memory under the session_id and can be claimed later
+via /intake/claim once the user signs up.
 
-Usage
------
-    POST /intake/stream
-    {
-      "tenant_id": "...",
-      "client_id": "...",
-      "session_id": "optional",
-      "input": "user message"
-    }
+At the end of the conversation:
+  - If tenant/client provided: profile ingested directly as a doc
+  - If anonymous: profile stored under session_id, awaiting /intake/claim
 """
 from __future__ import annotations
 
@@ -23,7 +18,7 @@ import logging
 import re
 import threading
 import time as _time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -34,13 +29,23 @@ from app.prompts.intake_prompts import build_intake_prompt
 logger = logging.getLogger(__name__)
 
 # ── Session state ──────────────────────────────────────────────────────────
-#
-# Per-session state keyed by f"{tenant_id}:{client_id}:{session_id}".
-# Holds conversation history + completion flag + collected profile.
 
-_SESSION_TTL_S = 3600 * 2  # 2 hours — intake is a longer-running flow
+_SESSION_TTL_S = 3600 * 2  # 2 hours
 _intake_sessions: Dict[str, Dict[str, Any]] = {}
 _intake_lock = threading.Lock()
+
+
+def _session_key(
+    session_id: str,
+    tenant_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+) -> str:
+    """Anonymous sessions key on session_id only.
+    Authenticated sessions use tenant:client:session for isolation.
+    """
+    if tenant_id and client_id:
+        return f"{tenant_id}:{client_id}:{session_id}"
+    return f"anon:{session_id}"
 
 
 def _get_session(key: str) -> Optional[Dict[str, Any]]:
@@ -77,7 +82,7 @@ def _update_session(
         s["expires_at"] = _time.monotonic() + _SESSION_TTL_S
 
 
-def _reset_session(key: str) -> None:
+def _reset_session_internal(key: str) -> None:
     with _intake_lock:
         _intake_sessions.pop(key, None)
 
@@ -90,11 +95,7 @@ _COMPLETE_RE = re.compile(
 )
 
 
-def _extract_profile(output: str) -> tuple[Optional[Dict[str, Any]], str]:
-    """If the output contains the completion marker, return (profile, cleaned_text).
-
-    Otherwise returns (None, output).
-    """
+def _extract_profile(output: str) -> Tuple[Optional[Dict[str, Any]], str]:
     m = _COMPLETE_RE.search(output)
     if not m:
         return None, output
@@ -103,17 +104,13 @@ def _extract_profile(output: str) -> tuple[Optional[Dict[str, Any]], str]:
     except json.JSONDecodeError as e:
         logger.warning("Failed to parse intake profile JSON: %s", e)
         return None, output
-    # Strip the marker block from the user-facing output
     cleaned = _COMPLETE_RE.sub("", output).strip()
     return profile, cleaned
 
 
 def _estimate_current_stage(messages: List[Dict[str, str]]) -> int:
-    """Rough stage counter based on assistant message count."""
-    # Each stage typically takes 2-4 exchanges (core + follow-up + summary)
     assistant_msgs = sum(1 for m in messages if m["role"] == "assistant")
-    stage = min(8, max(1, assistant_msgs // 2 + 1))
-    return stage
+    return min(8, max(1, assistant_msgs // 2 + 1))
 
 
 # ── Streaming entry point ──────────────────────────────────────────────────
@@ -121,33 +118,36 @@ def _estimate_current_stage(messages: List[Dict[str, str]]) -> int:
 
 async def stream_intake_agent(
     request: str,
-    tenant_id: str,
-    client_id: str,
+    tenant_id: Optional[str] = None,
+    client_id: Optional[str] = None,
     session_id: str = "default",
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Run one turn of the intake conversation. Yields SSE events.
 
-    Event types:
-      status    — progress update
-      partial   — assistant response text
-      done      — turn complete, normal flow
-      completed — intake finished, profile ingested. Includes profile + document_id
-      error     — something went wrong
+    tenant_id and client_id are optional. If omitted, the profile is
+    stored temporarily under session_id and must be claimed via
+    /intake/claim after the user signs up.
     """
-    session_key = f"{tenant_id}:{client_id}:{session_id}"
-    session = _get_session(session_key) or {
+    is_anonymous = not (tenant_id and client_id)
+    key = _session_key(session_id, tenant_id, client_id)
+    session = _get_session(key) or {
         "messages": [],
         "profile": None,
         "completed": False,
     }
 
-    # If intake was already completed in this session, gently redirect
     if session.get("completed"):
-        out = (
-            "We already completed your intake — I've saved your context profile. "
-            "You can now ask me questions about your business, generate surveys, "
-            "or explore other tools. Want to start fresh? Let me know."
-        )
+        if is_anonymous:
+            out = (
+                "We already completed your intake — your profile is saved "
+                "and ready to be attached to your account once you sign up."
+            )
+        else:
+            out = (
+                "We already completed your intake — I've saved your context "
+                "profile. You can now ask me questions about your business, "
+                "generate surveys, or explore other tools."
+            )
         yield {"type": "done", "output": out, "stage": "post_intake"}
         return
 
@@ -156,12 +156,10 @@ async def stream_intake_agent(
 
     yield {"type": "status", "message": f"Thinking... (stage {stage_num}/8)"}
 
-    # Build the LLM call
     prompt = build_intake_prompt()
     llm = get_llm("context_analysis")
     chain = prompt | llm | StrOutputParser()
 
-    # Assemble message history as LangChain messages
     lc_messages = []
     for m in history:
         if m["role"] == "user":
@@ -184,24 +182,26 @@ async def stream_intake_agent(
         yield {"type": "error", "message": f"Intake agent failed: {e}"}
         return
 
-    # Check for completion marker
     profile, cleaned_output = _extract_profile(output)
 
     if profile:
-        # Save + ingest the profile as a document
-        yield {"type": "status", "message": "Saving your profile..."}
-        document_id, warnings = await asyncio.to_thread(
-            _ingest_profile, profile, tenant_id, client_id,
-        )
-
-        # Update session
+        # Save the profile to session state
         _update_session(
-            session_key,
+            key,
             user_msg=request,
             assistant_msg=cleaned_output,
             profile=profile,
             completed=True,
         )
+
+        # If we have tenant/client, ingest immediately
+        document_id = ""
+        warnings: List[str] = []
+        if not is_anonymous:
+            yield {"type": "status", "message": "Saving your profile..."}
+            document_id, warnings = await asyncio.to_thread(
+                _ingest_profile, profile, tenant_id, client_id,
+            )
 
         yield {"type": "partial", "text": cleaned_output}
         yield {
@@ -209,13 +209,19 @@ async def stream_intake_agent(
             "output": cleaned_output,
             "profile": profile,
             "document_id": document_id,
+            "session_id": session_id,
+            "anonymous": is_anonymous,
+            "next_step": (
+                "Call POST /intake/claim with this session_id and your "
+                "tenant_id/client_id after signup to ingest the profile."
+                if is_anonymous else
+                "Profile ingested into your KB."
+            ),
             "warnings": warnings,
         }
         return
 
-    # Normal turn — save and return
-    _update_session(session_key, user_msg=request, assistant_msg=cleaned_output)
-
+    _update_session(key, user_msg=request, assistant_msg=cleaned_output)
     yield {"type": "partial", "text": cleaned_output}
     yield {"type": "done", "output": cleaned_output, "stage": stage_num}
 
@@ -227,20 +233,40 @@ def _ingest_profile(
     profile: Dict[str, Any],
     tenant_id: str,
     client_id: str,
-) -> tuple[str, List[str]]:
-    """Ingest the structured profile as a document so downstream agents use it.
-
-    Returns (document_id, warnings).
-    """
+) -> Tuple[str, List[str]]:
+    """Ingest the structured profile as a document so downstream agents use it."""
     from uuid import UUID
     from app.models.ingest import IngestInput
     from app.services.ingest.service import IngestService
 
-    # Format the profile as readable markdown for the chunks
-    sections = [
-        "# Context Profile (Intake)",
-        "",
-    ]
+    profile_text = _format_profile_markdown(profile)
+
+    try:
+        inp = IngestInput(
+            tenant_id=UUID(tenant_id),
+            client_id=UUID(client_id),
+            serialized_chunks=[{
+                "text": profile_text,
+                "chunk_index": 0,
+                "page_start": None,
+                "page_end": None,
+            }],
+            serialized_source_type="intake_profile",
+            serialized_source_uri=f"intake:{tenant_id}:{client_id}",
+            title="Context Profile (Intake)",
+            metadata={"intake_raw": profile},
+            extract_entities=True,
+        )
+        result = IngestService().ingest(inp)
+        return str(result.document_id), list(result.warnings or [])
+    except Exception as e:
+        logger.exception("Failed to ingest intake profile")
+        return "", [f"Ingest failed: {e}"]
+
+
+def _format_profile_markdown(profile: Dict[str, Any]) -> str:
+    """Format the structured profile as markdown for ingestion."""
+    sections = ["# Context Profile (Intake)", ""]
 
     identity = profile.get("identity_and_role", {}) or {}
     if identity:
@@ -287,35 +313,72 @@ def _ingest_profile(
             sections.append(f"- {item}")
         sections.append("")
 
-    profile_text = "\n".join(sections)
-
-    # Ingest as a serialized-chunks document
-    try:
-        inp = IngestInput(
-            tenant_id=UUID(tenant_id),
-            client_id=UUID(client_id),
-            serialized_chunks=[{
-                "text": profile_text,
-                "chunk_index": 0,
-                "page_start": None,
-                "page_end": None,
-            }],
-            serialized_source_type="intake_profile",
-            serialized_source_uri=f"intake:{tenant_id}:{client_id}",
-            title="Context Profile (Intake)",
-            metadata={"intake_raw": profile},
-            extract_entities=True,
-        )
-        result = IngestService().ingest(inp)
-        return str(result.document_id), list(result.warnings or [])
-    except Exception as e:
-        logger.exception("Failed to ingest intake profile")
-        return "", [f"Ingest failed: {e}"]
+    return "\n".join(sections)
 
 
-# ── Reset endpoint helper ──────────────────────────────────────────────────
+# ── Public helpers (called by router) ──────────────────────────────────────
 
 
-def reset_intake_session(tenant_id: str, client_id: str, session_id: str = "default") -> None:
-    """Drop an in-flight intake session (useful for 'start over')."""
-    _reset_session(f"{tenant_id}:{client_id}:{session_id}")
+def reset_intake_session(
+    session_id: str,
+    tenant_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+) -> None:
+    """Drop an in-flight intake session (anonymous or authenticated)."""
+    _reset_session_internal(_session_key(session_id, tenant_id, client_id))
+
+
+def get_stored_profile(session_id: str) -> Optional[Dict[str, Any]]:
+    """Look up a stored profile by session_id (checks anonymous bucket).
+
+    Returns the full session dict (messages + profile + completed) or None.
+    """
+    # Try anonymous first — that's the common case for /intake/profile lookups
+    s = _get_session(_session_key(session_id))
+    if s:
+        return {
+            "session_id": session_id,
+            "completed": s.get("completed", False),
+            "profile": s.get("profile"),
+            "message_count": len(s.get("messages", [])),
+        }
+    return None
+
+
+def claim_intake_profile(
+    session_id: str,
+    tenant_id: str,
+    client_id: str,
+) -> Dict[str, Any]:
+    """Attach an anonymous completed profile to a real tenant/client.
+
+    Returns one of:
+      {"status": "claimed", "document_id": ..., "warnings": [...]}
+      {"status": "not_found"}
+      {"status": "incomplete"}
+    """
+    anon_key = _session_key(session_id)
+    s = _get_session(anon_key)
+    if not s:
+        return {"status": "not_found"}
+    if not s.get("completed") or not s.get("profile"):
+        return {"status": "incomplete"}
+
+    profile = s["profile"]
+    document_id, warnings = _ingest_profile(profile, tenant_id, client_id)
+
+    # Move the session under the authenticated key and clear the anon entry
+    auth_key = _session_key(session_id, tenant_id, client_id)
+    with _intake_lock:
+        _intake_sessions[auth_key] = {
+            **s,
+            "expires_at": _time.monotonic() + _SESSION_TTL_S,
+        }
+        _intake_sessions.pop(anon_key, None)
+
+    return {
+        "status": "claimed",
+        "document_id": document_id,
+        "warnings": warnings,
+        "profile": profile,
+    }

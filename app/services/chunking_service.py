@@ -325,6 +325,21 @@ class ChunkingService:
         return ChunkingService.chunk_pages_spacy_token_aware(pages)
 
     @staticmethod
+    def text_bytes_to_chunks(file_bytes: bytes) -> List[Dict[str, Any]]:
+        """Chunk plain-text files (txt, md, csv, json, log) by token-aware paging."""
+        try:
+            text = file_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            text = file_bytes.decode("utf-8", errors="replace")
+        text = text.strip()
+        if not text:
+            return []
+        # Treat the whole file as a single page; the downstream chunker
+        # splits it into token-bounded windows.
+        pages = [{"page_start": 1, "page_end": 1, "text": text}]
+        return ChunkingService.chunk_pages_spacy_token_aware(pages)
+
+    @staticmethod
     def document_bytes_to_chunks(file_bytes: bytes, file_type: str) -> List[Dict[str, Any]]:
         ft = file_type.lower().strip(".")
         if ft == "pdf":
@@ -335,6 +350,8 @@ class ChunkingService:
             return ChunkingService.vtt_bytes_to_chunks(file_bytes)
         if ft in ("xlsx", "xls"):
             return ChunkingService.xlsx_bytes_to_chunks(file_bytes)
+        if ft in ("txt", "md", "markdown", "csv", "json", "log"):
+            return ChunkingService.text_bytes_to_chunks(file_bytes)
         raise ValueError(f"Unsupported file_type: {file_type}")
 
     # ── WebVTT parsing ────────────────────────────────────────────────────────

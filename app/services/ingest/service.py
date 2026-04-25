@@ -507,10 +507,14 @@ class IngestService:
         if not inp.file_name:
             raise ValueError("file_name is required for file ingest")
 
+        from app.services.ingest.constants import EXT_TO_SOURCE_TYPE
+
         file_name = inp.file_name
         file_type = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
         if file_type not in SUPPORTED_FILE_TYPES:
             raise ValueError(f"Unsupported file type '{file_type}'. Supported: {', '.join(SUPPORTED_FILE_TYPES)}.")
+        # Normalize the extension to a canonical source_type label
+        canonical_source_type = EXT_TO_SOURCE_TYPE.get(file_type, file_type)
 
         try:
             chunks = document_bytes_to_chunks(inp.file_bytes, file_type=file_type)
@@ -521,7 +525,7 @@ class IngestService:
         if not chunks:
             return IngestOutput(
                 document_id=UUID("00000000-0000-0000-0000-000000000000"),
-                source_type=file_type,
+                source_type=canonical_source_type,
                 source_uri="",
                 chunks_upserted=0,
                 warnings=["Chunking produced no output; document may be empty."],
@@ -541,7 +545,7 @@ class IngestService:
                 client_id=str(inp.client_id),
                 file_name=file_name,
                 file_bytes=inp.file_bytes,
-                source_type=file_type,
+                source_type=canonical_source_type,
                 title=inp.title or file_name,
                 metadata=inp.metadata or {},
                 chunks=chunks,
@@ -557,7 +561,7 @@ class IngestService:
 
         out = IngestOutput(
             document_id=UUID(doc_id) if isinstance(doc_id, str) else doc_id,
-            source_type=file_type,
+            source_type=canonical_source_type,
             source_uri=f"file:{file_name}",
             chunks_upserted=chunks_stored,
             entities_linked=len(entities),

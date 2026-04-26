@@ -20,6 +20,14 @@ class IngestInput(BaseModel):
 
     tenant_id: UUID
     client_id: UUID
+    study_id: Optional[UUID] = Field(
+        default=None,
+        description=(
+            "Optional study scope. When provided, the document is tagged "
+            "with this study_id in its metadata so insight tools can scope "
+            "analysis to a single research study within the tenant/client."
+        ),
+    )
     file_bytes: Optional[bytes] = None
     file_name: Optional[str] = None
     web_url: Optional[str] = None

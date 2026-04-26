@@ -753,6 +753,33 @@ def get_document_titles(
 # -- Documents --
 
 
+def list_study_document_ids(
+    *,
+    tenant_id: str,
+    client_id: str,
+    study_id: str,
+) -> List[str]:
+    """Return document IDs whose metadata.study_id matches study_id.
+
+    Calls list_documents (cached) and filters client-side. Used to scope
+    insight tools to a single study within a tenant/client.
+    """
+    try:
+        data = list_documents(tenant_id=tenant_id, client_id=client_id)
+    except Exception as e:
+        logger.warning("list_study_document_ids: list_documents failed: %s", e)
+        return []
+    items = data.get("items", []) or []
+    matched: List[str] = []
+    for d in items:
+        md = d.get("metadata") or {}
+        if md.get("study_id") == study_id:
+            doc_id = d.get("id")
+            if doc_id:
+                matched.append(str(doc_id))
+    return matched
+
+
 def list_documents(
     *,
     tenant_id: str,

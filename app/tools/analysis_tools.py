@@ -24,8 +24,41 @@ logger = logging.getLogger(__name__)
 def create_analysis_tools(
     tenant_id: str,
     client_id: str,
+    study_id: Optional[str] = None,
 ) -> list:
-    """Build deep analysis tools with tenant/client context in closures."""
+    """Build deep analysis tools with tenant/client (and optional study) scope.
+
+    When study_id is provided, search results are filtered to documents
+    whose metadata.study_id matches — keeping insights scoped to one
+    research study within the tenant/client.
+    """
+
+    def _study_doc_ids() -> Optional[set]:
+        """Lazy-load the set of document_ids in the current study, or None
+        if no study scope is active. Cached to avoid re-fetching list_documents
+        across multiple tool calls in the same /insights/generate request."""
+        if not study_id:
+            return None
+        try:
+            ids = core_client.list_study_document_ids(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                study_id=study_id,
+            )
+            return set(ids)
+        except Exception as e:
+            logger.warning("study scope fetch failed: %s", e)
+            return set()
+
+    def _filter_by_study(docs):
+        """Filter LangChain Documents to those in the active study scope.
+        No-op if study_id wasn't provided."""
+        scope = _study_doc_ids()
+        if scope is None:
+            return docs
+        if not scope:
+            return []
+        return [d for d in docs if d.metadata.get("document_id") in scope]
 
     # ── Transcript analysis ────────────────────────────────────────────
 
@@ -52,7 +85,7 @@ def create_analysis_tools(
 
         for q in queries:
             try:
-                docs = core_client.search_graph(
+                docs = _filter_by_study(core_client.search_graph(
                     tenant_id=tenant_id,
                     client_id=client_id,
                     query=q,
@@ -61,7 +94,7 @@ def create_analysis_tools(
                     node_types=["VideoTranscript", "Chunk"],
                     boost_pinned=True,
                     exclude_status=["archived", "deprecated"],
-                )
+                ))
                 for d in docs:
                     nid = d.metadata.get("node_id")
                     if nid and nid not in seen:
@@ -159,7 +192,7 @@ def create_analysis_tools(
 
         for q in queries:
             try:
-                docs = core_client.search_graph(
+                docs = _filter_by_study(core_client.search_graph(
                     tenant_id=tenant_id,
                     client_id=client_id,
                     query=q,
@@ -167,7 +200,7 @@ def create_analysis_tools(
                     hop_limit=1,
                     boost_pinned=True,
                     exclude_status=["archived", "deprecated"],
-                )
+                ))
                 for d in docs:
                     nid = d.metadata.get("node_id")
                     if nid and nid not in seen:
@@ -278,7 +311,7 @@ def create_analysis_tools(
 
         for q in base_queries:
             try:
-                docs = core_client.search_graph(
+                docs = _filter_by_study(core_client.search_graph(
                     tenant_id=tenant_id,
                     client_id=client_id,
                     query=q,
@@ -287,7 +320,7 @@ def create_analysis_tools(
                     boost_pinned=True,
                     exclude_status=["archived", "deprecated"],
                     recency_weight=0.15,
-                )
+                ))
                 for d in docs:
                     nid = d.metadata.get("node_id")
                     if nid and nid not in seen:
@@ -429,7 +462,7 @@ def create_analysis_tools(
 
         for q in queries:
             try:
-                docs = core_client.search_graph(
+                docs = _filter_by_study(core_client.search_graph(
                     tenant_id=tenant_id,
                     client_id=client_id,
                     query=q,
@@ -438,7 +471,7 @@ def create_analysis_tools(
                     node_types=["VideoTranscript"],  # transcripts only
                     boost_pinned=True,
                     exclude_status=["archived", "deprecated"],
-                )
+                ))
                 for d in docs:
                     nid = d.metadata.get("node_id")
                     if nid and nid not in seen:
@@ -539,7 +572,7 @@ def create_analysis_tools(
 
         for q in queries:
             try:
-                docs = core_client.search_graph(
+                docs = _filter_by_study(core_client.search_graph(
                     tenant_id=tenant_id,
                     client_id=client_id,
                     query=q,
@@ -547,7 +580,7 @@ def create_analysis_tools(
                     hop_limit=1,
                     boost_pinned=True,
                     exclude_status=["archived", "deprecated"],
-                )
+                ))
                 for d in docs:
                     nid = d.metadata.get("node_id")
                     if nid and nid not in seen:

@@ -28,8 +28,13 @@ def create_service_tools(
     tenant_id: str,
     client_id: str,
     client_profile: Optional[Dict[str, Any]] = None,
+    study_id: Optional[str] = None,
 ) -> list:
-    """Build all service tools with tenant/client context captured in closures."""
+    """Build all service tools with tenant/client context captured in closures.
+
+    When study_id is provided, deep-analysis tools (transcript, competitive,
+    synthesis, objections, hypotheses) are scoped to that study's documents.
+    """
 
     @tool
     def ask_question(question: str) -> Dict[str, Any]:
@@ -501,7 +506,7 @@ def create_service_tools(
 
     # Deep analysis tools
     from app.tools.analysis_tools import create_analysis_tools
-    analysis_tools = create_analysis_tools(tenant_id, client_id)
+    analysis_tools = create_analysis_tools(tenant_id, client_id, study_id=study_id)
 
     return [
         ask_question,

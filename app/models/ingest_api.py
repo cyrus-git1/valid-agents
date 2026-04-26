@@ -73,6 +73,10 @@ class IngestFileResponse(BaseModel):
 class IngestWebRequest(TenantScoped):
     url: str
     title: Optional[str] = None
+    study_id: Optional[str] = Field(
+        default=None,
+        description="Optional study scope — tags the document for study-scoped insights.",
+    )
     metadata: Dict[str, Any] = Field(default_factory=dict)
     entities: List[IngestEntity] = Field(default_factory=list)
     extract_entities: bool = Field(default=True, description="Run LLM-based NER on chunks")

@@ -29,6 +29,10 @@ router = APIRouter(prefix="/insights", tags=["insights"])
 class InsightAnalyzeRequest(BaseModel):
     tenant_id: UUID
     client_id: Optional[UUID] = None
+    study_id: Optional[UUID] = Field(
+        default=None,
+        description="Optional study scope — only documents tagged with this study_id are searched.",
+    )
     question: str = Field(min_length=1)
     contradiction_check: bool = False
 
@@ -39,7 +43,8 @@ def analyze_insight(req: InsightAnalyzeRequest):
 
     Retrieves via hop-1 from summary chunks (which mention-edge back to their
     source evidence), then synthesizes an answer whose every factual claim
-    cites a SOURCE chunk.
+    cites a SOURCE chunk. When study_id is provided, retrieval is scoped
+    to documents tagged with that study.
     """
     from app.workflows.insight_workflow import run_insight_analysis
 
@@ -47,6 +52,7 @@ def analyze_insight(req: InsightAnalyzeRequest):
         result = run_insight_analysis(
             tenant_id=str(req.tenant_id),
             client_id=str(req.client_id) if req.client_id else None,
+            study_id=str(req.study_id) if req.study_id else None,
             question=req.question,
             contradiction_check=req.contradiction_check,
         )
@@ -61,6 +67,14 @@ def analyze_insight(req: InsightAnalyzeRequest):
 
 
 class InsightsGenerateRequest(TenantScopedRequest):
+    study_id: Optional[UUID] = Field(
+        default=None,
+        description=(
+            "Optional study scope. When provided, all 5 analyses are filtered "
+            "to documents tagged with this study_id. Otherwise the entire "
+            "tenant/client KB is in scope."
+        ),
+    )
     focus: Optional[str] = Field(
         default=None,
         description="Optional focus (e.g., 'pricing strategy', 'customer onboarding')",
@@ -94,7 +108,8 @@ def generate_insights(req: InsightsGenerateRequest):
     tenant_str = str(req.tenant_id)
     client_str = str(req.client_id)
 
-    tools = create_analysis_tools(tenant_str, client_str)
+    study_str = str(req.study_id) if req.study_id else None
+    tools = create_analysis_tools(tenant_str, client_str, study_id=study_str)
     tool_map = {t.name: t for t in tools}
 
     valid_analyses = {"transcript", "competitive", "synthesis", "objections", "hypotheses"}
@@ -235,6 +250,7 @@ def generate_insights(req: InsightsGenerateRequest):
     return {
         "tenant_id": tenant_str,
         "client_id": client_str,
+        "study_id": study_str,
         "focus": req.focus,
         "analyses_requested": requested,
         "actionable_insights": actionable_insights,

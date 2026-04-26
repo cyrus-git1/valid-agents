@@ -37,6 +37,7 @@ async def ingest_file(
     ),
     tenant_id: uuid.UUID = Form(...),
     client_id: uuid.UUID = Form(...),
+    study_id: uuid.UUID | None = Form(default=None, description="Optional study scope — tags the document so insights can scope to a single study."),
     title: str | None = Form(default=None),
     entities: str | None = Form(default=None, description='JSON array of entities: [{"name": "...", "type": "..."}]'),
     extract_entities: bool = Form(default=True, description="Run LLM-based NER to auto-extract entities from chunks"),
@@ -48,6 +49,7 @@ async def ingest_file(
     result = IngestService().ingest_file_request(
         tenant_id=tenant_id,
         client_id=client_id,
+        study_id=study_id,
         file_bytes=file_bytes,
         file_name=file_name,
         content_type=content_type,
@@ -66,6 +68,7 @@ def ingest_web(req: IngestWebRequest) -> IngestWebResponse:
     result = IngestService().ingest_web_request(
         tenant_id=req.tenant_id,
         client_id=req.client_id,
+        study_id=req.study_id,
         url=req.url,
         title=req.title,
         metadata=req.metadata,

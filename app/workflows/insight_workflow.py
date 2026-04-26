@@ -44,6 +44,7 @@ SUMMARY_SOURCE_TYPES = ["ContextSummary", "DocumentSummary", "TopicSummary"]
 class InsightState(TypedDict, total=False):
     tenant_id: str
     client_id: str
+    study_id: Optional[str]
     question: str
     contradiction_check: bool
     # Classification output
@@ -144,16 +145,41 @@ def retrieve(state: InsightState) -> InsightState:
     Because the KG is already wired with mention edges from summaries (weight=0.5)
     to the source chunks' entities, hop_limit=1 from a summary pulls in the
     underlying source chunks automatically alongside the summary.
+
+    If state['study_id'] is set, results are filtered to documents tagged
+    with that study scope.
     """
+    # Load study scope (if any) once for both retrieval passes
+    study_id = state.get("study_id")
+    study_scope: Optional[set] = None
+    if study_id and state.get("client_id"):
+        try:
+            ids = core_client.list_study_document_ids(
+                tenant_id=state["tenant_id"],
+                client_id=state["client_id"],
+                study_id=study_id,
+            )
+            study_scope = set(ids)
+        except Exception as e:
+            logger.warning("insight.retrieve study scope load failed: %s", e)
+            study_scope = set()
+
+    def _filter(docs):
+        if study_scope is None:
+            return docs
+        if not study_scope:
+            return []
+        return [d for d in docs if d.metadata.get("document_id") in study_scope]
+
     try:
-        docs = core_client.search_graph(
+        docs = _filter(core_client.search_graph(
             tenant_id=state["tenant_id"],
             client_id=state.get("client_id"),
             query=state["question"],
             top_k=30,
             hop_limit=1,
             source_types=SUMMARY_SOURCE_TYPES,  # seeds only from summaries
-        )
+        ))
     except Exception as e:
         logger.warning("insight.retrieve(summaries) failed: %s", e)
         docs = []
@@ -161,7 +187,7 @@ def retrieve(state: InsightState) -> InsightState:
     # Second pass: pull source-chunk matches directly too, so we always have
     # raw evidence even if summaries are missing/stale.
     try:
-        source_docs = core_client.search_graph(
+        source_docs = _filter(core_client.search_graph(
             tenant_id=state["tenant_id"],
             client_id=state.get("client_id"),
             query=state["question"],
@@ -170,7 +196,7 @@ def retrieve(state: InsightState) -> InsightState:
             node_types=["Chunk"],
             # exclude summary parents so we only get original-source chunks
             exclude_status=["archived", "deprecated"],
-        )
+        ))
     except Exception as e:
         logger.warning("insight.retrieve(sources) failed: %s", e)
         source_docs = []
@@ -375,17 +401,20 @@ def run_insight_analysis(
     client_id: Optional[str],
     question: str,
     contradiction_check: bool = False,
+    study_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     graph = build_insight_graph()
     initial: InsightState = {
         "tenant_id": tenant_id,
         "client_id": client_id or "",
+        "study_id": study_id,
         "question": question,
         "contradiction_check": contradiction_check,
     }
     final = graph.invoke(initial)
     return {
         "question": question,
+        "study_id": study_id,
         "scope": final.get("scope"),
         "scope_ref": final.get("scope_ref"),
         "answer": final.get("answer", ""),

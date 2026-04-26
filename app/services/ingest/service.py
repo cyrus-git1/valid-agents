@@ -142,6 +142,7 @@ class IngestService:
         extract_entities: bool = True,
         prune_after_ingest: bool = False,
         skip_context_generation: bool = False,
+        study_id=None,
     ) -> IngestOutput:
         parsed_entities = parse_entities_json(entities_json)
         mode = choose_ingest_mode(
@@ -195,6 +196,11 @@ class IngestService:
                 skip_context_generation=skip_context_generation,
             )
 
+        # Inject study_id if provided (the .ingest() entry point also handles
+        # this, but setting it on the IngestInput here is cleaner)
+        if study_id is not None:
+            ingest_input = ingest_input.model_copy(update={"study_id": study_id})
+
         return self.ingest(ingest_input)
 
     def ingest_uploaded_file(
@@ -238,20 +244,22 @@ class IngestService:
         extract_entities: bool = True,
         prune_after_ingest: bool = False,
         skip_context_generation: bool = False,
+        study_id=None,
     ) -> IngestOutput:
-        return self.ingest(
-            build_web_ingest_input(
-                tenant_id=tenant_id,
-                client_id=client_id,
-                url=url,
-                title=title,
-                metadata=metadata,
-                entities=entities,
-                extract_entities=extract_entities,
-                prune_after_ingest=prune_after_ingest,
-                skip_context_generation=skip_context_generation,
-            )
+        ingest_input = build_web_ingest_input(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            url=url,
+            title=title,
+            metadata=metadata,
+            entities=entities,
+            extract_entities=extract_entities,
+            prune_after_ingest=prune_after_ingest,
+            skip_context_generation=skip_context_generation,
         )
+        if study_id is not None:
+            ingest_input = ingest_input.model_copy(update={"study_id": study_id})
+        return self.ingest(ingest_input)
 
     def ingest_uploaded_file_batch(
         self,
@@ -685,6 +693,12 @@ class IngestService:
         return out
 
     def ingest(self, inp: IngestInput) -> IngestOutput:
+        # Tag with study_id so insight tools can scope to a single study
+        if inp.study_id is not None:
+            md = dict(inp.metadata or {})
+            md["study_id"] = str(inp.study_id)
+            inp = inp.model_copy(update={"metadata": md})
+
         if inp.file_bytes is not None and inp.file_name is not None:
             result = self._ingest_file(inp)
         elif inp.web_url is not None:

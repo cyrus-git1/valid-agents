@@ -40,6 +40,7 @@ from app.routers.valid_ingest_router import router as valid_ingest_router
 from app.routers.transcripts_router import router as transcripts_router
 from app.routers.transcription_orchestrator_router import router as transcription_orchestrator_router
 from app.routers.intake_router import router as intake_router
+from app.routers.clusters_router import router as clusters_router
 
 app = FastAPI(
     title="Valid Agent Service",
@@ -78,6 +79,7 @@ app.include_router(valid_ingest_router)
 app.include_router(transcripts_router)
 app.include_router(transcription_orchestrator_router)
 app.include_router(intake_router)
+app.include_router(clusters_router)
 
 
 @app.get("/health", tags=["health"])

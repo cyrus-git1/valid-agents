@@ -27,6 +27,11 @@ openpyxl
 # Transcript analysis (lexicon-based sentiment)
 vaderSentiment
 
+# Clustering (deterministic-first respondent clustering)
+scikit-learn
+hdbscan
+rapidfuzz
+
 # Optimizer (Claude Code as proposer agent)
 claude-agent-sdk
 

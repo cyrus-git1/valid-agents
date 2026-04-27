@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from app.agents.transcription import cache as orchestrator_cache
 from app.agents.transcription.discriminate_agent import run_discriminate
 from app.agents.transcription.llm_agents import AGENT_REGISTRY
+from app.tools.discriminate_transcript_tools import reconcile_sarcasm
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,25 @@ def run_orchestration(
                     logger.exception("agent %s crashed", name)
                     section_results[name] = {"status": "failed", "error": str(e)}
                     errors.append({"agent": name, "error": str(e)})
+
+    # ── Cross-layer sarcasm reconciliation (Tier 2) ─────────────────────
+    # If both VADER (in discriminate) and the LLM sentiment agent ran,
+    # check for utterances where they disagree — strong sarcasm signal.
+    if discriminate and isinstance(discriminate, dict):
+        sentiment_result = section_results.get("sentiment")
+        cues = discriminate.get("_cues") or []
+        if sentiment_result and cues:
+            try:
+                discriminate["sarcasm_flags"] = reconcile_sarcasm(
+                    existing_flags=discriminate.get("sarcasm_flags") or [],
+                    cues=cues,
+                    vader_per_cue=discriminate.get("vader_per_cue") or [],
+                    llm_sentiment=sentiment_result,
+                )
+            except Exception as e:
+                logger.warning("sarcasm reconciliation failed: %s", e)
+        # Strip the internal cues field — not part of the public response
+        discriminate.pop("_cues", None)
 
     # ── Assemble response ───────────────────────────────────────────────
     duration = None

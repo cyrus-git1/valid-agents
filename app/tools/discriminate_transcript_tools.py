@@ -239,3 +239,218 @@ def vader_aggregate(per_cue: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
     return {"overall": overall, "per_speaker": per_speaker}
+
+
+# ── Sarcasm flagging ─────────────────────────────────────────────────────
+#
+# Two-tier detection:
+#   1. detect_sarcasm_markers — deterministic lexical/typographical markers
+#      (regex against the cue text). Fast, no LLM needed.
+#   2. reconcile_sarcasm — cross-layer signal that compares VADER per-cue
+#      scores against LLM sentiment output. When the lexicon and the LLM
+#      disagree on the same utterance, that's a strong sarcasm signal.
+#
+# Both produce flags with a `signals` array and a `confidence` rating
+# ("low" | "medium" | "high") so consumers can decide where to act.
+
+
+# Multi-word lexical markers that strongly imply sarcasm in transcripts
+_SARCASM_PHRASES = [
+    "yeah right", "yeah, right",
+    "oh great", "oh, great",
+    "oh sure", "oh, sure",
+    "sure thing",
+    "yeah no", "yeah, no",
+    "fine whatever", "fine, whatever",
+    "oh wonderful", "oh, wonderful",
+    "oh fantastic", "oh, fantastic",
+    "oh perfect", "oh, perfect",
+    "what a surprise",
+    "as if",
+    "give me a break",
+    "tell me about it",
+    "very funny",
+    "how convenient",
+    "lucky me",
+    "just great",
+]
+_SARCASM_PHRASE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(p) for p in _SARCASM_PHRASES) + r")\b",
+    re.IGNORECASE,
+)
+
+# Single positive words that, when isolated and period-terminated, often
+# signal sarcasm ("Wonderful." vs "Wonderful!")
+_FLAT_POSITIVE_WORDS = {
+    "wonderful", "fantastic", "amazing", "great", "perfect", "brilliant",
+    "lovely", "excellent", "marvelous", "splendid",
+}
+_FLAT_POSITIVE_RE = re.compile(
+    r"^(?:oh,?\s+|well,?\s+)?(" + "|".join(_FLAT_POSITIVE_WORDS) + r")\.+$",
+    re.IGNORECASE,
+)
+
+# All-caps emphasis: 3+ ALL-CAPS letters in a single word, ignoring
+# common abbreviations (we treat the word as caps-emphatic if it's not
+# a known acronym pattern)
+_CAPS_EMPHASIS_RE = re.compile(r"\b[A-Z]{4,}\b")
+
+# Scare quotes: text inside double quotes within a longer utterance
+_SCARE_QUOTE_RE = re.compile(r'"[^"]{2,40}"')
+
+
+def detect_sarcasm_markers(cues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deterministic sarcasm marker detection (Tier 1).
+
+    Returns a list of flagged cues with the signal types found.
+    Confidence is "low" for single signals and "medium" for multiple.
+    """
+    flags: List[Dict[str, Any]] = []
+    for c in cues:
+        text = (c.get("text") or "").strip()
+        if not text:
+            continue
+
+        signals: List[str] = []
+
+        if _SARCASM_PHRASE_RE.search(text):
+            signals.append("lexical_marker")
+
+        if _FLAT_POSITIVE_RE.match(text):
+            signals.append("flat_positive_period")
+
+        # Caps emphasis is signal only when the cue isn't entirely uppercase
+        # (avoid flagging acronym-heavy cues) AND has a caps word
+        if _CAPS_EMPHASIS_RE.search(text) and text != text.upper():
+            signals.append("caps_emphasis")
+
+        if _SCARE_QUOTE_RE.search(text):
+            signals.append("scare_quotes")
+
+        if not signals:
+            continue
+
+        confidence = "medium" if len(signals) >= 2 else "low"
+
+        flags.append({
+            "cue_index": c.get("index"),
+            "speaker": _speaker_label(c.get("speaker")),
+            "start": round(float(c.get("start", 0.0)), 2),
+            "text": text,
+            "signals": signals,
+            "confidence": confidence,
+        })
+    return flags
+
+
+def _normalize_text_for_match(s: str) -> str:
+    """Normalise text for substring matching across LLM-cited quotes vs cues."""
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def reconcile_sarcasm(
+    *,
+    existing_flags: List[Dict[str, Any]],
+    cues: List[Dict[str, Any]],
+    vader_per_cue: List[Dict[str, Any]],
+    llm_sentiment: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Tier 2 cross-layer reconciliation.
+
+    Compares VADER per-cue compound scores against the LLM sentiment
+    agent's output. When VADER reads strongly positive but the LLM has
+    cited the same utterance under a negative theme or notable quote,
+    that's a strong sarcasm signal.
+
+    Boosts confidence of an existing marker-based flag, or adds a NEW
+    flag for cues that markers missed.
+
+    Args:
+        existing_flags: output of detect_sarcasm_markers (may be empty)
+        cues: parsed VTT cues
+        vader_per_cue: VADER score per cue
+        llm_sentiment: result dict from the sentiment LLM agent (or None)
+
+    Returns:
+        Updated list of sarcasm flags (de-duplicated by cue_index).
+    """
+    if not llm_sentiment or not isinstance(llm_sentiment, dict):
+        return existing_flags
+
+    # Build a quick cue lookup by index
+    cue_by_index = {c.get("index"): c for c in cues}
+    vader_by_index = {v.get("cue_index"): v for v in vader_per_cue}
+
+    # Collect quotes the LLM cited as negative-leaning. We pull from:
+    # - sentiment.themes where sentiment field == "negative"
+    # - sentiment.notable_quotes where sentiment field == "negative"
+    negative_quotes: List[str] = []
+    for theme in (llm_sentiment.get("themes") or []):
+        if not isinstance(theme, dict):
+            continue
+        if str(theme.get("sentiment", "")).lower() == "negative":
+            desc = theme.get("description") or ""
+            if desc:
+                negative_quotes.append(desc)
+    for nq in (llm_sentiment.get("notable_quotes") or []):
+        if not isinstance(nq, dict):
+            continue
+        if str(nq.get("sentiment", "")).lower() == "negative":
+            q = nq.get("quote") or ""
+            if q:
+                negative_quotes.append(q)
+
+    if not negative_quotes:
+        return existing_flags
+
+    normalized_negatives = [_normalize_text_for_match(q) for q in negative_quotes]
+
+    # Index existing flags so we can boost rather than duplicate
+    flags_by_index: Dict[Any, Dict[str, Any]] = {
+        f["cue_index"]: f for f in existing_flags if "cue_index" in f
+    }
+
+    # For each cue with strongly-positive VADER, check if its text appears
+    # in any negative-cited LLM quote. If yes → sarcasm.
+    _STRONG_POS_THRESHOLD = 0.5
+    for cue_idx, vader in vader_by_index.items():
+        compound = float(vader.get("compound", 0.0))
+        if compound < _STRONG_POS_THRESHOLD:
+            continue
+        cue = cue_by_index.get(cue_idx)
+        if not cue:
+            continue
+        cue_norm = _normalize_text_for_match(cue.get("text") or "")
+        if len(cue_norm) < 4:
+            continue
+        # substring match either direction (LLM may have abbreviated the quote
+        # or pulled a sentence fragment)
+        matched = any(
+            cue_norm in nq or nq in cue_norm
+            for nq in normalized_negatives
+            if nq
+        )
+        if not matched:
+            continue
+
+        if cue_idx in flags_by_index:
+            existing = flags_by_index[cue_idx]
+            if "vader_llm_disagreement" not in existing.get("signals", []):
+                existing.setdefault("signals", []).append("vader_llm_disagreement")
+            existing["confidence"] = "high"
+            existing["vader_compound"] = compound
+        else:
+            flags_by_index[cue_idx] = {
+                "cue_index": cue_idx,
+                "speaker": _speaker_label(cue.get("speaker")),
+                "start": round(float(cue.get("start", 0.0)), 2),
+                "text": (cue.get("text") or "").strip(),
+                "signals": ["vader_llm_disagreement"],
+                "confidence": "medium",
+                "vader_compound": compound,
+            }
+
+    return sorted(
+        flags_by_index.values(),
+        key=lambda f: (f.get("start", 0.0), f.get("cue_index") or 0),
+    )

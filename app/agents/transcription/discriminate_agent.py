@@ -43,6 +43,7 @@ def run_discriminate(vtt_content: str) -> Dict[str, Any]:
     entities = T.extract_entities_spacy(cues)
     vader_per_cue = T.vader_sentiment_per_cue(cues)
     vader_agg = T.vader_aggregate(vader_per_cue)
+    sarcasm_flags = T.detect_sarcasm_markers(cues)  # Tier 1 — markers only
 
     return {
         "speakers": speakers,
@@ -54,4 +55,11 @@ def run_discriminate(vtt_content: str) -> Dict[str, Any]:
         # vader_per_cue can be large; include but the orchestrator may strip
         # it from the API response for size if requested.
         "vader_per_cue": vader_per_cue,
+        # Tier 1 sarcasm flags (deterministic markers). The orchestrator
+        # will run Tier 2 (cross-layer VADER vs LLM) after the sentiment
+        # agent completes and may upgrade these flags' confidence.
+        "sarcasm_flags": sarcasm_flags,
+        # cues kept for the orchestrator's reconcile step; not surfaced in
+        # the public response.
+        "_cues": cues,
     }

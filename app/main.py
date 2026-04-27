@@ -38,6 +38,7 @@ from app.routers.kg_router import router as kg_router
 from app.routers.documents_router import router as documents_router
 from app.routers.valid_ingest_router import router as valid_ingest_router
 from app.routers.transcripts_router import router as transcripts_router
+from app.routers.transcription_orchestrator_router import router as transcription_orchestrator_router
 from app.routers.intake_router import router as intake_router
 
 app = FastAPI(
@@ -75,6 +76,7 @@ app.include_router(kg_router)
 app.include_router(documents_router)
 app.include_router(valid_ingest_router)
 app.include_router(transcripts_router)
+app.include_router(transcription_orchestrator_router)
 app.include_router(intake_router)
 
 

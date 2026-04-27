@@ -24,6 +24,9 @@ python-docx
 pandas
 openpyxl
 
+# Transcript analysis (lexicon-based sentiment)
+vaderSentiment
+
 # Optimizer (Claude Code as proposer agent)
 claude-agent-sdk
 

@@ -765,77 +765,195 @@ PERSONA_STEP_CONFIG = StepConfig(
 
 
 def cheap_check_insights(output: Any) -> CheapCheckResult:
-    """Structural validation for business insights report."""
+    """Structural validation for the in-depth insights report.
+
+    The bar is intentionally higher than the v1 single-finding minimum:
+    a thorough report must cover current state + future steps, must cite
+    evidence, and should populate the new structured sections (qualitative
+    findings, hypotheses, etc.) when underlying data exists.
+    """
     if not isinstance(output, dict):
         return CheapCheckResult(False, "Output must be a JSON object.")
 
     summary = output.get("executive_summary", "")
-    if not summary or len(summary) < 100:
-        return CheapCheckResult(False, f"executive_summary is too short ({len(summary)} chars). Need ≥100.")
+    if not summary or len(summary) < 250:
+        return CheapCheckResult(
+            False,
+            f"executive_summary is too short ({len(summary)} chars). Need ≥250 — must synthesise current state and forward direction.",
+        )
 
     lower = summary.strip().lower()
     if lower.startswith("as an ai") or lower.startswith("i am") or lower.startswith("i'm"):
         return CheapCheckResult(False, "executive_summary starts with prompt leakage.")
 
-    findings = output.get("key_findings", [])
-    if not isinstance(findings, list) or len(findings) < 1:
-        return CheapCheckResult(False, f"Need at least 1 key_finding.")
+    # Current-state assessment is mandatory
+    csa = output.get("current_state_assessment")
+    if not isinstance(csa, dict) or not csa.get("overall_diagnostic"):
+        return CheapCheckResult(
+            False,
+            "Missing 'current_state_assessment.overall_diagnostic'. The report must include a current-state diagnostic.",
+        )
 
+    # Key findings: at least 3 findings, each with text + evidence_sources list
+    findings = output.get("key_findings", [])
+    if not isinstance(findings, list) or len(findings) < 3:
+        return CheapCheckResult(
+            False,
+            f"Need at least 3 key_findings (got {len(findings) if isinstance(findings, list) else 0}).",
+        )
     for i, f in enumerate(findings):
         if not isinstance(f, dict):
             return CheapCheckResult(False, f"Finding {i} is not an object.")
         if not f.get("finding"):
             return CheapCheckResult(False, f"Finding {i} is missing 'finding' text.")
-        # evidence_sources should be a list (can be empty if data sources were limited)
         if "evidence_sources" in f and not isinstance(f["evidence_sources"], list):
             return CheapCheckResult(False, f"Finding {i} evidence_sources must be a list.")
 
-    recs = output.get("recommendations", [])
-    if not isinstance(recs, list) or len(recs) < 1:
-        return CheapCheckResult(False, f"Need at least 1 recommendation.")
-
+    # Forward-step recommendations
+    recs = output.get("recommendations_future_steps") or output.get("recommendations") or []
+    if not isinstance(recs, list) or len(recs) < 3:
+        return CheapCheckResult(
+            False,
+            f"Need at least 3 recommendations_future_steps (got {len(recs) if isinstance(recs, list) else 0}).",
+        )
     for i, r in enumerate(recs):
         if not isinstance(r, dict) or not r.get("recommendation"):
             return CheapCheckResult(False, f"Recommendation {i} is missing or invalid.")
+        if not r.get("priority"):
+            return CheapCheckResult(False, f"Recommendation {i} is missing 'priority'.")
+        if not r.get("rationale"):
+            return CheapCheckResult(False, f"Recommendation {i} is missing 'rationale'.")
 
+    # Data sources + gaps still required
     if not isinstance(output.get("data_sources_used"), dict):
         return CheapCheckResult(False, "Missing 'data_sources_used' dict.")
     if not isinstance(output.get("data_gaps"), list):
         return CheapCheckResult(False, "Missing 'data_gaps' list.")
 
+    # Meta insights — required so reports surface their own confidence
+    if not isinstance(output.get("meta_insights"), dict):
+        return CheapCheckResult(False, "Missing 'meta_insights' object.")
+
+    # Soft requirement: at least ONE of the structured analytical sections
+    # must have content. Otherwise the report is a thin wrapper around the
+    # context summary and should be rejected.
+    has_analytical_content = any([
+        bool(output.get("quantitative_findings")),
+        bool(output.get("qualitative_findings")),
+        bool(output.get("objections_and_blockers")),
+        bool(output.get("hypotheses_to_test")),
+        bool(output.get("contradictions_and_blind_spots")),
+        bool((output.get("competitive_landscape") or {}).get("competitors_mentioned")),
+        bool(output.get("segments")),
+    ])
+    if not has_analytical_content:
+        return CheapCheckResult(
+            False,
+            "Report has no analytical content — at least one of "
+            "quantitative_findings, qualitative_findings, objections_and_blockers, "
+            "hypotheses_to_test, contradictions_and_blind_spots, competitive_landscape, "
+            "or segments must be populated.",
+        )
+
     return CheapCheckResult(True)
 
 
 def _insights_context_builder(output: Any, inputs: dict) -> str:
-    """Build human message for insights manager evaluation."""
+    """Build human message for insights manager evaluation.
+
+    Surfaces the THICKER schema so the manager can score depth across all
+    sections: quantitative, qualitative, competitive, segments, hypotheses,
+    enrichment, etc.
+    """
     if not isinstance(output, dict):
         return "Output was not valid JSON."
 
-    summary = output.get("executive_summary", "")[:500]
-    findings = output.get("key_findings", [])
-    recs = output.get("recommendations", [])
-    sources_used = output.get("data_sources_used", {})
-    gaps = output.get("data_gaps", [])
-    personas = output.get("personas_referenced", [])
+    summary = output.get("executive_summary", "")[:600]
+    csa = output.get("current_state_assessment") or {}
+    findings = output.get("key_findings", []) or []
+    recs = (
+        output.get("recommendations_future_steps")
+        or output.get("recommendations")
+        or []
+    )
+    quant = output.get("quantitative_findings", []) or []
+    qual = output.get("qualitative_findings", []) or []
+    objections = output.get("objections_and_blockers", []) or []
+    contradictions = output.get("contradictions_and_blind_spots", []) or []
+    hypotheses = output.get("hypotheses_to_test", []) or []
+    competitive = (output.get("competitive_landscape") or {})
+    segments = output.get("segments", []) or []
+    enrichment = (output.get("external_context_via_enrichment") or {})
+    sources_used = output.get("data_sources_used", {}) or {}
+    gaps = output.get("data_gaps", []) or []
+    meta = output.get("meta_insights", {}) or {}
+    personas = output.get("personas_referenced", []) or []
 
-    findings_text = "\n".join(
-        f"- [{f.get('confidence', '?')}] {f.get('finding', '?')} (sources: {len(f.get('evidence_sources', []))})"
-        for f in findings[:5]
+    def _bullet(items, fmt):
+        return "\n".join(fmt(x) for x in items[:5]) or "(none)"
+
+    findings_text = _bullet(
+        findings,
+        lambda f: f"- [{f.get('confidence', '?')}] {f.get('finding', '?')[:200]} (evidence: {len(f.get('evidence_sources', []))} sources)",
     )
-    recs_text = "\n".join(
-        f"- [{r.get('priority', '?')}] {r.get('recommendation', '?')}"
-        for r in recs[:5]
+    recs_text = _bullet(
+        recs,
+        lambda r: f"- [{r.get('priority', '?')}] {r.get('recommendation', '?')[:200]} | impact: {r.get('expected_impact', '?')[:80]}",
     )
-    sources_text = ", ".join(f"{k}={v}" for k, v in sources_used.items())
+    quant_text = _bullet(
+        quant,
+        lambda q: f"- {q.get('metric', '?')[:60]} = {q.get('value', '?')} (n={q.get('n', '?')}, sig={q.get('significance', '?')})",
+    )
+    qual_text = _bullet(
+        qual,
+        lambda t: f"- {t.get('theme', '?')[:60]}: {t.get('summary', '?')[:120]} (freq={t.get('frequency', '?')})",
+    )
+    obj_text = _bullet(
+        objections,
+        lambda o: f"- [{o.get('severity', '?')}/{o.get('category', '?')}] {o.get('objection', '?')[:120]}",
+    )
+    contra_text = _bullet(
+        contradictions,
+        lambda c: f"- {c.get('topic', c.get('blind_spot', '?'))[:120]}",
+    )
+    hypo_text = _bullet(
+        hypotheses,
+        lambda h: f"- [{h.get('priority', '?')}/{h.get('category', '?')}] {h.get('hypothesis', '?')[:140]}",
+    )
+    seg_text = _bullet(
+        segments,
+        lambda s: f"- {s.get('label', '?')} (n={s.get('size', '?')}): {s.get('headline', '?')[:120]}",
+    )
+    competitors_list = competitive.get("competitors_mentioned", []) or []
+    comp_text = _bullet(
+        competitors_list,
+        lambda c: f"- {c.get('name', '?')}: strengths={len(c.get('strengths', []))}, weaknesses={len(c.get('weaknesses', []))}",
+    )
+    enrichment_summary = enrichment.get("summary", "")[:200] or "(no enrichment used)"
+    sources_text = ", ".join(f"{k}={v}" for k, v in sources_used.items()) or "(none)"
     gaps_text = ", ".join(g.get("source", "?") for g in gaps) if gaps else "(none)"
 
     return (
         f"Executive summary:\n{summary}...\n\n"
-        f"Key findings ({len(findings)}):\n{findings_text}\n\n"
-        f"Recommendations ({len(recs)}):\n{recs_text}\n\n"
-        f"Data sources: {sources_text}\n"
+        f"Current state diagnostic: {csa.get('overall_diagnostic', '(missing)')[:300]}\n"
+        f"What's working: {len(csa.get('what_is_working', []))} items | "
+        f"What's not: {len(csa.get('what_is_not_working', []))} items | "
+        f"Confidence: {csa.get('confidence_level', '?')}\n\n"
+        f"Quantitative findings ({len(quant)}):\n{quant_text}\n\n"
+        f"Qualitative findings ({len(qual)}):\n{qual_text}\n\n"
+        f"Objections / blockers ({len(objections)}):\n{obj_text}\n\n"
+        f"Contradictions / blind spots ({len(contradictions)}):\n{contra_text}\n\n"
+        f"Hypotheses to test ({len(hypotheses)}):\n{hypo_text}\n\n"
+        f"Competitive landscape — competitors ({len(competitors_list)}):\n{comp_text}\n\n"
+        f"Segments ({len(segments)}):\n{seg_text}\n\n"
+        f"External enrichment summary: {enrichment_summary}\n\n"
+        f"Cross-cutting key findings ({len(findings)}):\n{findings_text}\n\n"
+        f"Forward-step recommendations ({len(recs)}):\n{recs_text}\n\n"
+        f"Data sources used: {sources_text}\n"
         f"Gaps: {gaps_text}\n"
-        f"Personas: {', '.join(personas) if personas else '(none)'}"
+        f"Personas: {', '.join(personas) if personas else '(none)'}\n"
+        f"Meta — coverage: {meta.get('data_coverage', '?')}, freshness: {meta.get('freshness', '?')}, "
+        f"bias_flags: {len(meta.get('sample_bias_flags', []))}"
     )
 
 
@@ -845,15 +963,17 @@ INSIGHTS_STEP_CONFIG = StepConfig(
     manager_prompt=INSIGHTS_MANAGER_PROMPT,
     manager_context_builder=_insights_context_builder,
     rubric=[
-        RubricDimension("evidence_grounding", 0.25, "Are findings backed by specific data from analyses, not generic claims?"),
-        RubricDimension("cross_source_synthesis", 0.25, "Does the report connect insights across sentiment, transcripts, surveys, and KB?"),
-        RubricDimension("actionability", 0.20, "Are recommendations specific and implementable?"),
-        RubricDimension("completeness", 0.15, "Does the report cover all available data sources, not just one?"),
-        RubricDimension("persona_integration", 0.15, "Are findings contextualized by audience personas when available?"),
+        RubricDimension("evidence_grounding", 0.18, "Are findings backed by specific tool outputs (quotes, metrics with CIs, named competitors), not generic claims?"),
+        RubricDimension("cross_source_synthesis", 0.16, "Does the report connect insights across quantitative, qualitative, segmentation, and external enrichment?"),
+        RubricDimension("current_state_clarity", 0.14, "Is the current_state_assessment a sharp, specific diagnostic, not platitudes?"),
+        RubricDimension("forward_step_quality", 0.18, "Are recommendations specific, prioritised, evidence-backed, and tied to expected impact?"),
+        RubricDimension("analytical_depth", 0.14, "Are the structured sections (quantitative, qualitative, objections, hypotheses, segments) populated wherever the data supports them?"),
+        RubricDimension("external_enrichment_use", 0.10, "Did the agent use web enrichment to bring in external context the KB lacks?"),
+        RubricDimension("persona_integration", 0.10, "Are findings contextualised by audience personas when available?"),
     ],
-    score_threshold=0.7,
-    max_retries=0,        # no retries — too expensive for ReAct agent
-    use_manager=False,    # disabled until all data sources are working
+    score_threshold=0.72,
+    max_retries=1,        # one retry with feedback when below threshold
+    use_manager=True,     # re-enabled — the new schema is rich enough to evaluate
 )
 
 

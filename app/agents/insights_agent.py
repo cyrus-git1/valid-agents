@@ -41,15 +41,39 @@ def run_insights_agent(
     client_id: str,
     client_profile: Optional[Dict[str, Any]] = None,
     focus_query: Optional[str] = None,
+    survey_ids: Optional[List[str]] = None,
+    study_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Generate a business insights report using a ReAct agent.
+    """Generate an in-depth diagnostic + forward-step report using a ReAct agent.
 
-    The agent checks available data, runs relevant analyses, synthesizes
-    findings, and recommends enrichment for gaps. Never blocks on missing data.
+    The agent has access to: discovery tools, qualitative analytics
+    (transcript / synthesis / objections / hypotheses / competitive intel),
+    quantitative analytics (NPS / T2B / CIs / cross-tabs), respondent
+    clustering, and web enrichment for external context. Scope is
+    optionally narrowed to survey_ids or study_id.
+
+    Output schema is deliberately rich (quantitative_findings,
+    qualitative_findings, objections_and_blockers, hypotheses_to_test,
+    contradictions_and_blind_spots, competitive_landscape, segments,
+    external_context_via_enrichment, recommendations_future_steps,
+    meta_insights, etc.). The harness manager evaluates depth across
+    all sections and one retry is allowed below threshold.
     """
-    user_message = focus_query or "Generate a comprehensive business insights report from all available data sources."
+    scope_hint = ""
+    if survey_ids:
+        scope_hint = f" Scoped to survey_ids: {survey_ids}."
+    elif study_id:
+        scope_hint = f" Scoped to study_id: {study_id}."
+    user_message = (
+        focus_query
+        or f"Produce an in-depth current-state diagnostic and forward-step recommendations using all available data sources.{scope_hint}"
+    )
 
-    tools = create_insights_tools(tenant_id, client_id, client_profile)
+    tools = create_insights_tools(
+        tenant_id, client_id, client_profile,
+        survey_ids=survey_ids,
+        study_id=study_id,
+    )
 
     def step_fn(inputs: dict, feedback_section: str):
         system_prompt = INSIGHTS_AGENT_SYSTEM_PROMPT.replace(
@@ -146,7 +170,19 @@ def run_insights_agent(
 
     report = harness_result.output if isinstance(harness_result.output, dict) else _empty_report()
 
-    # Count tool calls
+    # Count tool calls — include the new analytical tool names
+    _ANALYTICAL_TOOLS = {
+        # legacy
+        "analyze_sentiment", "extract_transcript_insights",
+        "compute_confidence_intervals", "run_strategic_analysis",
+        # scope-aware additions
+        "compute_quantitative_metrics", "compute_crosstab", "analyze_clusters",
+        # deep-analysis tools
+        "analyze_transcript", "competitive_intelligence",
+        "cross_document_synthesis", "extract_objections", "generate_hypotheses",
+        # enrichment (web)
+        "recommend_enrichment",
+    }
     total_tool_calls = 0
     analyses_run = set()
     for attempt in harness_result.attempt_traces:
@@ -155,22 +191,44 @@ def run_insights_agent(
         total_tool_calls += len(calls)
         for c in calls:
             tool_name = c.get("tool", "")
-            if tool_name in ("analyze_sentiment", "extract_transcript_insights",
-                            "compute_confidence_intervals", "run_strategic_analysis"):
+            if tool_name in _ANALYTICAL_TOOLS:
                 analyses_run.add(tool_name)
 
-    # Build final output
+    # Recommendations: prefer the new key, fall back to legacy
+    recs = (
+        report.get("recommendations_future_steps")
+        or report.get("recommendations")
+        or []
+    )
+
+    # Build final output — surface the full v2 schema
     return {
         "tenant_id": tenant_id,
         "client_id": client_id,
+        "survey_ids": survey_ids or [],
+        "study_id": study_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # Top-level narrative
         "executive_summary": report.get("executive_summary", ""),
+        "current_state_assessment": report.get("current_state_assessment", {}),
+        # Analytical sections
+        "quantitative_findings": report.get("quantitative_findings", []),
+        "qualitative_findings": report.get("qualitative_findings", []),
+        "competitive_landscape": report.get("competitive_landscape", {}),
+        "segments": report.get("segments", []),
+        "objections_and_blockers": report.get("objections_and_blockers", []),
+        "contradictions_and_blind_spots": report.get("contradictions_and_blind_spots", []),
+        "hypotheses_to_test": report.get("hypotheses_to_test", []),
+        "external_context_via_enrichment": report.get("external_context_via_enrichment", {}),
+        # Cross-cutting
         "key_findings": report.get("key_findings", []),
-        "recommendations": report.get("recommendations", []),
+        "recommendations_future_steps": recs,
+        # Coverage / context
         "data_sources_used": report.get("data_sources_used", {}),
         "personas_referenced": report.get("personas_referenced", []),
         "data_gaps": report.get("data_gaps", []),
         "enrichment_recommendations": report.get("enrichment_recommendations", []),
+        "meta_insights": report.get("meta_insights", {}),
         "metadata": {
             "tool_calls_used": total_tool_calls,
             "harness_score": harness_result.final_score,
@@ -183,15 +241,44 @@ def run_insights_agent(
 
 
 def _empty_report() -> Dict[str, Any]:
-    """Return a minimal valid report structure."""
+    """Return a minimal valid report structure with the rich v2 schema."""
     return {
         "executive_summary": "",
+        "current_state_assessment": {
+            "overall_diagnostic": "",
+            "what_is_working": [],
+            "what_is_not_working": [],
+            "confidence_level": "low",
+        },
+        "quantitative_findings": [],
+        "qualitative_findings": [],
+        "competitive_landscape": {
+            "competitors_mentioned": [],
+            "win_signals": [],
+            "loss_signals": [],
+            "positioning_gaps": [],
+        },
+        "segments": [],
+        "objections_and_blockers": [],
+        "contradictions_and_blind_spots": [],
+        "hypotheses_to_test": [],
+        "external_context_via_enrichment": {
+            "summary": "",
+            "key_external_facts": [],
+            "trends_to_watch": [],
+        },
         "key_findings": [],
-        "recommendations": [],
+        "recommendations_future_steps": [],
         "data_sources_used": {},
         "personas_referenced": [],
         "data_gaps": [],
         "enrichment_recommendations": [],
+        "meta_insights": {
+            "data_coverage": "sparse",
+            "freshness": "unknown",
+            "sample_bias_flags": [],
+            "confidence_calibration": "",
+        },
     }
 
 

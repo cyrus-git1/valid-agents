@@ -207,6 +207,129 @@ def vader_sentiment_per_cue(cues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def sentiment_trajectory(
+    cues: List[Dict[str, Any]],
+    per_cue: List[Dict[str, Any]],
+    *,
+    inflection_threshold: float = 0.4,
+    smoothing_window: int = 3,
+) -> Dict[str, Any]:
+    """Compute a sentiment timeline + inflection points across a session.
+
+    Pairs each VADER per-cue score with the cue's start time so the frontend
+    can render a line chart. Detects inflection points where the smoothed
+    compound score shifts by `inflection_threshold` between consecutive cues.
+
+    Returns:
+        {
+          "timeline": [{time_seconds, compound, smoothed_compound, speaker, cue_index}],
+          "inflection_points": [{
+              from_time, to_time, from_compound, to_compound, delta,
+              direction, speaker_at_shift, surrounding_text
+          }],
+          "arc_summary": "starts positive, dips at 04:32, recovers"
+        }
+    """
+    if not cues or not per_cue:
+        return {"timeline": [], "inflection_points": [], "arc_summary": ""}
+
+    # Index cues by index for quick lookup of start times + text
+    cue_by_index = {c.get("index"): c for c in cues}
+
+    # Build raw timeline (preserve per-cue ordering as they appear in cues)
+    raw_timeline: List[Dict[str, Any]] = []
+    for s in per_cue:
+        ci = s.get("cue_index")
+        cue = cue_by_index.get(ci)
+        if cue is None:
+            continue
+        raw_timeline.append({
+            "cue_index": ci,
+            "time_seconds": round(float(cue.get("start", 0.0)), 2),
+            "compound": s.get("compound", 0.0),
+            "speaker": s.get("speaker", "Unknown"),
+            "text": (cue.get("text") or "")[:280],
+        })
+    raw_timeline.sort(key=lambda p: p["time_seconds"])
+
+    # Apply moving-average smoothing so a single sarcastic outlier doesn't
+    # register as an inflection point
+    half = max(1, smoothing_window // 2)
+    smoothed: List[float] = []
+    for i, point in enumerate(raw_timeline):
+        lo = max(0, i - half)
+        hi = min(len(raw_timeline), i + half + 1)
+        window = [p["compound"] for p in raw_timeline[lo:hi]]
+        smoothed.append(round(sum(window) / len(window), 4))
+
+    timeline = [
+        {**p, "smoothed_compound": smoothed[i]}
+        for i, p in enumerate(raw_timeline)
+    ]
+
+    # Detect inflection points: |smoothed[i] - smoothed[i-1]| >= threshold
+    inflection_points: List[Dict[str, Any]] = []
+    for i in range(1, len(timeline)):
+        prev = timeline[i - 1]
+        curr = timeline[i]
+        delta = curr["smoothed_compound"] - prev["smoothed_compound"]
+        if abs(delta) < inflection_threshold:
+            continue
+        inflection_points.append({
+            "from_time": prev["time_seconds"],
+            "to_time": curr["time_seconds"],
+            "from_compound": prev["smoothed_compound"],
+            "to_compound": curr["smoothed_compound"],
+            "delta": round(delta, 4),
+            "direction": "positive_shift" if delta > 0 else "negative_shift",
+            "speaker_at_shift": curr["speaker"],
+            "surrounding_text": curr.get("text", "")[:240],
+        })
+
+    return {
+        "timeline": timeline,
+        "inflection_points": inflection_points,
+        "arc_summary": _describe_arc(timeline, inflection_points),
+    }
+
+
+def _describe_arc(
+    timeline: List[Dict[str, Any]],
+    inflection_points: List[Dict[str, Any]],
+) -> str:
+    """Plain-text summary of the sentiment arc. Deterministic."""
+    if not timeline:
+        return ""
+
+    def _label(c: float) -> str:
+        if c >= 0.3:
+            return "positive"
+        if c <= -0.2:
+            return "negative"
+        return "neutral"
+
+    start_label = _label(timeline[0]["smoothed_compound"])
+    end_label = _label(timeline[-1]["smoothed_compound"])
+
+    if not inflection_points:
+        if start_label == end_label:
+            return f"Stays {start_label} throughout."
+        return f"Drifts from {start_label} to {end_label}."
+
+    # Format mm:ss for shifts
+    def _fmt(t: float) -> str:
+        m = int(t // 60)
+        s = int(t % 60)
+        return f"{m:02d}:{s:02d}"
+
+    parts = [f"Starts {start_label}"]
+    for ip in inflection_points[:5]:  # cap so summary isn't a wall of text
+        verb = "rises" if ip["direction"] == "positive_shift" else "drops"
+        parts.append(f"{verb} at {_fmt(ip['to_time'])}")
+    parts.append(f"ends {end_label}")
+    return ", ".join(parts) + "."
+
+
 def vader_aggregate(per_cue: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Aggregate VADER scores: overall mean + per-speaker mean."""
     if not per_cue:
@@ -239,6 +362,100 @@ def vader_aggregate(per_cue: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
     return {"overall": overall, "per_speaker": per_speaker}
+
+
+# ── Qualitative NPS / net sentiment ──────────────────────────────────────
+
+
+def qualitative_nps(
+    per_cue: List[Dict[str, Any]],
+    *,
+    promoter_threshold: float = 0.5,
+    detractor_threshold: float = -0.2,
+) -> Dict[str, Any]:
+    """Compute an NPS-style score from VADER per-cue compound scores.
+
+    Treats each cue as a "vote":
+      - compound >= promoter_threshold → promoter
+      - compound <= detractor_threshold → detractor
+      - otherwise → passive
+
+    Returns:
+      {
+        "qualitative_nps": float,        # promoter_pct - detractor_pct, range -100..100
+        "promoter_pct": float,
+        "passive_pct": float,
+        "detractor_pct": float,
+        "promoters": int, "passives": int, "detractors": int,
+        "n_cues": int,
+        "per_speaker": {speaker: {qualitative_nps, ...}}
+      }
+
+    Lets researchers compare qualitative interview sentiment on the same
+    -100..100 scale as their NPS surveys.
+    """
+    if not per_cue:
+        return {
+            "qualitative_nps": 0.0, "promoter_pct": 0.0, "passive_pct": 0.0,
+            "detractor_pct": 0.0, "promoters": 0, "passives": 0, "detractors": 0,
+            "n_cues": 0, "per_speaker": {},
+        }
+
+    def _bucket(score: float) -> str:
+        if score >= promoter_threshold:
+            return "promoter"
+        if score <= detractor_threshold:
+            return "detractor"
+        return "passive"
+
+    promoters = passives = detractors = 0
+    per_spk_buckets: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: {"promoters": 0, "passives": 0, "detractors": 0, "n": 0}
+    )
+    for s in per_cue:
+        bucket = _bucket(float(s.get("compound", 0.0)))
+        spk = s.get("speaker", "Unknown")
+        if bucket == "promoter":
+            promoters += 1
+            per_spk_buckets[spk]["promoters"] += 1
+        elif bucket == "detractor":
+            detractors += 1
+            per_spk_buckets[spk]["detractors"] += 1
+        else:
+            passives += 1
+            per_spk_buckets[spk]["passives"] += 1
+        per_spk_buckets[spk]["n"] += 1
+
+    n = len(per_cue)
+    promoter_pct = round(100.0 * promoters / n, 2)
+    passive_pct = round(100.0 * passives / n, 2)
+    detractor_pct = round(100.0 * detractors / n, 2)
+    qual_nps = round(promoter_pct - detractor_pct, 2)
+
+    per_speaker = {}
+    for spk, b in per_spk_buckets.items():
+        sn = b["n"]
+        p_pct = round(100.0 * b["promoters"] / sn, 2) if sn else 0.0
+        d_pct = round(100.0 * b["detractors"] / sn, 2) if sn else 0.0
+        per_speaker[spk] = {
+            "promoter_pct": p_pct,
+            "passive_pct": round(100.0 * b["passives"] / sn, 2) if sn else 0.0,
+            "detractor_pct": d_pct,
+            "qualitative_nps": round(p_pct - d_pct, 2),
+            "n_cues": sn,
+        }
+
+    return {
+        "qualitative_nps": qual_nps,
+        "promoter_pct": promoter_pct,
+        "passive_pct": passive_pct,
+        "detractor_pct": detractor_pct,
+        "promoters": promoters,
+        "passives": passives,
+        "detractors": detractors,
+        "n_cues": n,
+        "per_speaker": per_speaker,
+    }
 
 
 # ── Sarcasm flagging ─────────────────────────────────────────────────────

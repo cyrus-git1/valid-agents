@@ -44,6 +44,9 @@ def run_discriminate(vtt_content: str) -> Dict[str, Any]:
     vader_per_cue = T.vader_sentiment_per_cue(cues)
     vader_agg = T.vader_aggregate(vader_per_cue)
     sarcasm_flags = T.detect_sarcasm_markers(cues)  # Tier 1 — markers only
+    # Tier 1 analytics extensions:
+    sentiment_traj = T.sentiment_trajectory(cues, vader_per_cue)
+    qual_nps = T.qualitative_nps(vader_per_cue)
 
     return {
         "speakers": speakers,
@@ -52,6 +55,13 @@ def run_discriminate(vtt_content: str) -> Dict[str, Any]:
         "filler_words": fillers,
         "entities": entities,
         "vader_sentiment": vader_agg,
+        # Sentiment trajectory: timeline + inflection points + arc summary.
+        # Lets the frontend draw a sentiment-over-time chart and surface
+        # the moments where sentiment shifted (e.g., when pricing came up).
+        "sentiment_trajectory": sentiment_traj,
+        # Qualitative NPS: -100..100 score derived from VADER cue buckets
+        # so qualitative sessions can be compared directly to NPS surveys.
+        "qualitative_nps": qual_nps,
         # vader_per_cue can be large; include but the orchestrator may strip
         # it from the API response for size if requested.
         "vader_per_cue": vader_per_cue,

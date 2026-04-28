@@ -24,7 +24,9 @@ from scipy import stats
 from app.models.confidence_interval import (
     MIN_SAMPLE_SIZE,
     QUANTITATIVE_QUESTION_TYPES,
+    BoxScore,
     MeanCI,
+    NPSScore,
     ProportionCI,
     QuestionCI,
     RankCI,
@@ -87,7 +89,7 @@ class ConfidenceIntervalService:
                 warning=f"Unsupported type: {qtype}",
             )
 
-    # ── rating / nps  →  CI on mean ──────────────────────────────────────
+    # ── rating / nps  →  CI on mean + Top-2/Bottom-2 box + (NPS only) NPS ──
 
     def _ci_mean(
         self,
@@ -115,6 +117,75 @@ class ConfidenceIntervalService:
             confidence_level, df=n - 1, loc=mean, scale=sem,
         )
 
+        # Determine the scale extent so we can pick T2B/B2B thresholds.
+        # NPS is fixed at 0-10. For rating, infer from the data extent
+        # (capped at 10 — anything bigger is treated as continuous and we
+        # skip box scores).
+        scale_max = 10.0 if qtype == "nps" else float(arr.max())
+        scale_min = 0.0 if qtype == "nps" else float(arr.min())
+
+        top_2_box: Optional[BoxScore] = None
+        bottom_2_box: Optional[BoxScore] = None
+        nps_score: Optional[NPSScore] = None
+
+        if qtype == "nps":
+            # Standard NPS thresholds: promoters=9-10, passives=7-8, detractors=0-6
+            promoters = int(np.sum(arr >= 9))
+            passives = int(np.sum((arr >= 7) & (arr <= 8)))
+            detractors = int(np.sum(arr <= 6))
+            promoter_pct = 100.0 * promoters / n
+            passive_pct = 100.0 * passives / n
+            detractor_pct = 100.0 * detractors / n
+            nps_value = promoter_pct - detractor_pct
+
+            # CI on the NPS itself: NPS = p - d, both binomial proportions on
+            # the same n. Treat as a paired/related-sample contrast — exact
+            # variance is Var(p) + Var(d) - 2 Cov(p, d) where Cov(p,d) = -p*d/n
+            # since promoters and detractors are mutually exclusive bins.
+            p_hat = promoters / n
+            d_hat = detractors / n
+            var_nps = (p_hat * (1 - p_hat) + d_hat * (1 - d_hat) + 2 * p_hat * d_hat) / n
+            se_nps = math.sqrt(max(var_nps, 0.0))
+            z = stats.norm.ppf(1 - (1 - confidence_level) / 2)
+            margin = z * se_nps * 100.0  # convert proportion-scale to NPS-scale
+            nps_score = NPSScore(
+                promoters=promoters,
+                passives=passives,
+                detractors=detractors,
+                promoter_pct=round(promoter_pct, 2),
+                passive_pct=round(passive_pct, 2),
+                detractor_pct=round(detractor_pct, 2),
+                nps=round(nps_value, 2),
+                nps_ci_lower=round(nps_value - margin, 2),
+                nps_ci_upper=round(nps_value + margin, 2),
+                n=n,
+            )
+            # T2B / B2B for NPS using its standard 2-point top/bottom buckets
+            top_2_box = _box_score(
+                arr, n, scale_min=9.0, scale_max=10.0,
+                label="Top 2 Box (Promoters: 9-10)",
+                confidence_level=confidence_level,
+            )
+            bottom_2_box = _box_score(
+                arr, n, scale_min=0.0, scale_max=1.0,
+                label="Bottom 2 Box (0-1)",
+                confidence_level=confidence_level,
+            )
+        elif scale_max <= 10.0:
+            # Likert-style rating: T2B = top 2 points, B2B = bottom 2 points
+            top_2_box = _box_score(
+                arr, n,
+                scale_min=scale_max - 1.0, scale_max=scale_max,
+                label="Top 2 Box",
+                confidence_level=confidence_level,
+            )
+            bottom_2_box = _box_score(
+                arr, n,
+                scale_min=scale_min, scale_max=scale_min + 1.0,
+                label="Bottom 2 Box",
+                confidence_level=confidence_level,
+            )
+
         return QuestionCI(
             question_id=qid, question_type=qtype, label=label, n=n,
             mean_ci=MeanCI(
@@ -124,6 +195,9 @@ class ConfidenceIntervalService:
                 std_dev=round(std, 4),
                 n=n,
             ),
+            top_2_box=top_2_box,
+            bottom_2_box=bottom_2_box,
+            nps_score=nps_score,
             warning=warning,
         )
 
@@ -376,3 +450,32 @@ def _sample_warning(n: int) -> Optional[str]:
     if n < 10:
         return f"Small sample size ({n}): confidence interval may be very wide."
     return None
+
+
+def _box_score(
+    arr: np.ndarray,
+    n: int,
+    *,
+    scale_min: float,
+    scale_max: float,
+    label: str,
+    confidence_level: float,
+) -> BoxScore:
+    """Compute a top/bottom-N-box score with a Wilson CI on the proportion.
+
+    Counts responses with `scale_min <= value <= scale_max` and computes
+    a Wilson CI on count/n.
+    """
+    count = int(np.sum((arr >= scale_min) & (arr <= scale_max)))
+    proportion = count / n if n else 0.0
+    lo, hi = _wilson_ci(count, n, confidence_level)
+    return BoxScore(
+        label=label,
+        threshold_lower=round(scale_min, 4),
+        threshold_upper=round(scale_max, 4),
+        count=count,
+        proportion=round(proportion, 4),
+        ci_lower=round(lo, 4),
+        ci_upper=round(hi, 4),
+        n=n,
+    )

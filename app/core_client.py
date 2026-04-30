@@ -131,6 +131,62 @@ def _outbound_headers() -> Dict[str, str]:
     return hdrs
 
 
+# ── Provenance injection (actor + source_app + request_id) ──────────────────
+# Every ingest/upsert payload to the core API gets a `provenance` block plus
+# top-level convenience fields. The core API can pick up either form — when
+# its migration is live it reads the columns; until then the data still rides
+# inside `metadata.provenance` so nothing is lost.
+
+def _inject_provenance(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp the payload with the active ProvenanceCtx.
+
+    Semantics
+    ---------
+    `tenant_id` identifies the organization; `client_id` identifies the
+    individual user/seat within that org. For normal authenticated calls
+    `client_id` IS the human actor — so when no explicit `actor_id` was set
+    via `X-Actor-Id` or `with_provenance()`, we fall back to `client_id` as
+    the canonical actor. `actor_id` is reserved for cases where the actor
+    is NOT a client_id:
+      - intake (pre-signup, no client_id yet) → actor_id = intake session id
+      - Vera autopilot → actor_id = vera session/run id, actor_type=agent
+      - service accounts / scheduled jobs → actor_id = service name
+
+    Adds top-level fields (actor_id, actor_type, source_app, request_id,
+    triggered_at) AND nests them under `metadata.provenance` so older core
+    API versions that only forward `metadata` still preserve provenance.
+    """
+    try:
+        # Local import to avoid a hard dependency cycle at module load.
+        from app.models.provenance import get_provenance
+        prov = get_provenance()
+    except Exception:
+        return payload
+
+    pdict = prov.to_payload()
+
+    # Fallback: if the request didn't explicitly set actor_id (no override
+    # via header or with_provenance), use client_id from the payload — the
+    # human actor for normal authenticated calls.
+    if not pdict.get("actor_id"):
+        client_id = payload.get("client_id")
+        if client_id:
+            pdict["actor_id"] = str(client_id)
+
+    # Top-level fields — what the migrated core API will read into columns.
+    for k, v in pdict.items():
+        # Don't clobber a value the caller explicitly set.
+        payload.setdefault(k, v)
+
+    # Also stash inside metadata.provenance for backward compat.
+    md = payload.get("metadata")
+    if not isinstance(md, dict):
+        md = {}
+    md.setdefault("provenance", pdict)
+    payload["metadata"] = md
+    return payload
+
+
 # -- Search (data plane queries) --
 
 
@@ -362,6 +418,7 @@ def ingest_document(
     metadata: Optional[Dict[str, Any]] = None,
     chunks: Optional[List[Dict[str, Any]]] = None,
     entities: Optional[List[Dict[str, Any]]] = None,
+    previous_version_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send a processed document to the core API for storage.
 
@@ -386,6 +443,9 @@ def ingest_document(
         "chunks": first_batch,
         "entities": all_entities,
     }
+    if previous_version_id:
+        payload["previous_version_id"] = previous_version_id
+    _inject_provenance(payload)
     job_id = _enqueue_ingest("/ingest/processed", payload)
     result = _poll_ingest_job(job_id)
     total_stored = len(first_batch)
@@ -396,7 +456,7 @@ def ingest_document(
     for i in range(_CHUNK_BATCH_SIZE, len(all_chunks), _CHUNK_BATCH_SIZE):
         batch = all_chunks[i:i + _CHUNK_BATCH_SIZE]
         try:
-            batch_job = _enqueue_ingest("/ingest/processed", {
+            batch_payload = {
                 "tenant_id": tenant_id,
                 "client_id": client_id,
                 "file_name": file_name,
@@ -406,7 +466,9 @@ def ingest_document(
                 "metadata": {**(metadata or {}), "append_to_document": doc_id},
                 "chunks": batch,
                 "entities": [],  # entities only sent with first batch
-            })
+            }
+            _inject_provenance(batch_payload)
+            batch_job = _enqueue_ingest("/ingest/processed", batch_payload)
             batch_result = _poll_ingest_job(batch_job)
             total_stored += len(batch)
             warnings.extend(batch_result.get("warnings", []))
@@ -429,6 +491,7 @@ def ingest_web_scraped(
     metadata: Optional[Dict[str, Any]] = None,
     chunks: Optional[List[Dict[str, Any]]] = None,
     entities: Optional[List[Dict[str, Any]]] = None,
+    previous_version_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send processed web scrape data to the core API for storage.
 
@@ -439,7 +502,7 @@ def ingest_web_scraped(
 
     # First batch
     first_batch = all_chunks[:_CHUNK_BATCH_SIZE]
-    first_job = _enqueue_ingest("/ingest/processed-web", {
+    first_payload = {
         "tenant_id": tenant_id,
         "client_id": client_id,
         "url": url,
@@ -447,7 +510,11 @@ def ingest_web_scraped(
         "metadata": metadata or {},
         "chunks": first_batch,
         "entities": all_entities,
-    })
+    }
+    if previous_version_id:
+        first_payload["previous_version_id"] = previous_version_id
+    _inject_provenance(first_payload)
+    first_job = _enqueue_ingest("/ingest/processed-web", first_payload)
     result = _poll_ingest_job(first_job)
     total_stored = len(first_batch)
     warnings = list(result.get("warnings", []))
@@ -457,7 +524,7 @@ def ingest_web_scraped(
     for i in range(_CHUNK_BATCH_SIZE, len(all_chunks), _CHUNK_BATCH_SIZE):
         batch = all_chunks[i:i + _CHUNK_BATCH_SIZE]
         try:
-            batch_job = _enqueue_ingest("/ingest/processed-web", {
+            batch_payload = {
                 "tenant_id": tenant_id,
                 "client_id": client_id,
                 "url": url,
@@ -465,7 +532,9 @@ def ingest_web_scraped(
                 "metadata": {**(metadata or {}), "append_to_document": doc_id},
                 "chunks": batch,
                 "entities": [],
-            })
+            }
+            _inject_provenance(batch_payload)
+            batch_job = _enqueue_ingest("/ingest/processed-web", batch_payload)
             batch_result = _poll_ingest_job(batch_job)
             total_stored += len(batch)
             warnings.extend(batch_result.get("warnings", []))
@@ -593,6 +662,7 @@ def _ingest_summary(
         body["topic"] = topic
     if memory_version_at_generation is not None:
         body["memory_version_at_generation"] = memory_version_at_generation
+    _inject_provenance(body)
     result = _post("/ingest/summary", body)
     invalidate_cache(tenant_id=tenant_id, client_id=client_id)
     return result
@@ -893,3 +963,48 @@ def _get(endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         resp = client.get(url, params=params, headers=_outbound_headers())
         resp.raise_for_status()
         return resp.json()
+
+
+# ── Ingest job listing (provenance / upload-history UX) ────────────────────
+
+
+def list_ingest_jobs(
+    *,
+    tenant_id: str,
+    client_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """List ingest jobs for upload-history UX.
+
+    Proxies to the core API's `GET /ingest/jobs` endpoint (added alongside the
+    provenance migration). Returns `{items: [...], total: int}`. Until the core
+    API endpoint is live, this returns a graceful empty result so the agent
+    service can ship ahead of the data plane.
+    """
+    params: Dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+    if client_id:
+        params["client_id"] = client_id
+    if actor_id:
+        params["actor_id"] = actor_id
+    if since:
+        params["since"] = since
+    try:
+        return _get("/ingest/jobs", params)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            logger.info("Core API /ingest/jobs not yet available — returning empty list")
+            return {"items": [], "total": 0, "warning": "core API ingest_jobs endpoint not yet available"}
+        raise
+
+
+def get_ingest_job(*, job_id: str) -> Dict[str, Any]:
+    """Fetch a single ingest job by id (already exists for polling — re-exposed
+    here for upload-history detail views)."""
+    try:
+        return _get(f"/ingest/jobs/{job_id}", {})
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return {"job_id": job_id, "status": "unknown", "warning": "job not found"}
+        raise

@@ -241,23 +241,32 @@ def _ingest_profile(
 
     profile_text = _format_profile_markdown(profile)
 
+    # Intake runs pre-signup → no authenticated user. Stamp explicitly so this
+    # is distinguishable from console uploads later.
+    from app.models.provenance import with_provenance
+
     try:
-        inp = IngestInput(
-            tenant_id=UUID(tenant_id),
-            client_id=UUID(client_id),
-            serialized_chunks=[{
-                "text": profile_text,
-                "chunk_index": 0,
-                "page_start": None,
-                "page_end": None,
-            }],
-            serialized_source_type="intake_profile",
-            serialized_source_uri=f"intake:{tenant_id}:{client_id}",
-            title="Context Profile (Intake)",
-            metadata={"intake_raw": profile},
-            extract_entities=True,
-        )
-        result = IngestService().ingest(inp)
+        with with_provenance(
+            actor_id=None,
+            actor_type="anonymous",
+            source_app="intake",
+        ):
+            inp = IngestInput(
+                tenant_id=UUID(tenant_id),
+                client_id=UUID(client_id),
+                serialized_chunks=[{
+                    "text": profile_text,
+                    "chunk_index": 0,
+                    "page_start": None,
+                    "page_end": None,
+                }],
+                serialized_source_type="intake_profile",
+                serialized_source_uri=f"intake:{tenant_id}:{client_id}",
+                title="Context Profile (Intake)",
+                metadata={"intake_raw": profile},
+                extract_entities=True,
+            )
+            result = IngestService().ingest(inp)
         return str(result.document_id), list(result.warnings or [])
     except Exception as e:
         logger.exception("Failed to ingest intake profile")

@@ -16,6 +16,7 @@ import dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.middleware.provenance import ProvenanceMiddleware
 from app.middleware.rate_limiter import RateLimiterMiddleware
 
 dotenv.load_dotenv()
@@ -37,11 +38,11 @@ from app.routers.form_router import router as form_router
 from app.routers.kg_router import router as kg_router
 from app.routers.documents_router import router as documents_router
 from app.routers.valid_ingest_router import router as valid_ingest_router
-from app.routers.transcripts_router import router as transcripts_router
 from app.routers.transcription_orchestrator_router import router as transcription_orchestrator_router
 from app.routers.intake_router import router as intake_router
 from app.routers.clusters_router import router as clusters_router
 from app.routers.crosstab_router import router as crosstab_router
+from app.routers.ingest_jobs_router import router as ingest_jobs_router
 
 app = FastAPI(
     title="Valid Agent Service",
@@ -57,6 +58,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RateLimiterMiddleware)
+# ProvenanceMiddleware runs OUTERMOST (added last → first in the chain) so the
+# ProvenanceCtx is bound before any handler — including before rate limiting,
+# so rejected requests still surface a request_id in logs.
+app.add_middleware(ProvenanceMiddleware)
 
 # Existing agent routers
 app.include_router(agent_router)
@@ -77,11 +82,11 @@ app.include_router(form_router)
 app.include_router(kg_router)
 app.include_router(documents_router)
 app.include_router(valid_ingest_router)
-app.include_router(transcripts_router)
 app.include_router(transcription_orchestrator_router)
 app.include_router(intake_router)
 app.include_router(clusters_router)
 app.include_router(crosstab_router)
+app.include_router(ingest_jobs_router)
 
 
 @app.get("/health", tags=["health"])

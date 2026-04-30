@@ -9,14 +9,14 @@ Replaces the rigid router agent with a three-phase flow:
 
 Usage
 -----
-    from app.agents.service_agent import run_service_agent
+    from app.agents.service_agent import stream_service_agent
 
-    result = run_service_agent(
+    async for event in stream_service_agent(
         request="What are our top risks?",
         tenant_id="...",
         client_id="...",
-    )
-    print(result["output"])
+    ):
+        print(event)
 """
 from __future__ import annotations
 
@@ -112,70 +112,6 @@ _TOOL_INTENT_MAP: Dict[str, str] = {
     "competitive_intelligence": "competitive_intel",
     "cross_document_synthesis": "synthesis",
 }
-
-
-def run_service_agent(
-    request: str,
-    tenant_id: str,
-    client_id: str,
-    client_profile: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Entry point. Returns {intent, output, sources, confidence}.
-
-    Conversation history is managed automatically via episodic memory —
-    a per-session cache keyed by (tenant_id, client_id) that stores
-    recent exchanges so follow-up messages have context.
-    """
-    session_key = f"{tenant_id}:{client_id}"
-    history = _get_session_history(session_key)
-
-    # ── Phase 0: Quick conversation check ──────────────────────────────
-    if _is_likely_conversation(request) and not history:
-        result = _handle_conversation(request)
-        _append_to_history(session_key, request, result["output"])
-        return result
-
-    # ── Phase 1: Plan ──────────────────────────────────────────────────
-    plan = _plan(request, history)
-
-    # Plan detected conversation
-    if plan.get("is_conversation"):
-        return _handle_conversation(request)
-
-    # Plan detected out-of-scope request
-    if plan.get("is_out_of_scope"):
-        return {
-            "intent": "out_of_scope",
-            "output": (
-                "I'm here to help with your market research on Valid — I can search "
-                "your knowledge base, generate surveys, discover personas, and more. "
-                "That question falls outside what I can help with."
-            ),
-            "sources": [],
-            "confidence": 1.0,
-        }
-
-    if plan.get("needs_clarification"):
-        return {
-            "intent": "clarification",
-            "output": plan.get("clarification_message", "Could you clarify your request?"),
-            "sources": [],
-            "confidence": plan.get("confidence", 0.0),
-        }
-
-    # ── Phase 2: Execute ───────────────────────────────────────────────
-    result = _execute(request, plan, tenant_id, client_id, client_profile, history)
-
-    # ── Phase 3: Reflect (only for multi-step plans) ───────────────────
-    steps = plan.get("steps", [])
-    if len(steps) >= 2 and result.get("output"):
-        reflection = _reflect(request, result["output"])
-        if reflection.get("quality") == "poor" and reflection.get("gaps"):
-            gaps_text = "; ".join(reflection["gaps"])
-            result["output"] += f"\n\nNote: some aspects may be incomplete — {gaps_text}"
-
-    _append_to_history(session_key, request, result.get("output", ""))
-    return result
 
 
 # ── Streaming entry point ─────────────────────────────────────────────────

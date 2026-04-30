@@ -55,6 +55,12 @@ class LLMConfig:
     # Optimizer (Claude via Anthropic)
     OPTIMIZER: str          = os.environ.get("LLM_OPTIMIZER",          "claude-sonnet-4-20250514")
 
+    # Insights multi-agent pipeline
+    INSIGHTS_PLANNER: str     = os.environ.get("LLM_INSIGHTS_PLANNER",     CONTEXT_ANALYSIS)
+    INSIGHTS_SPECIALIST: str  = os.environ.get("LLM_INSIGHTS_SPECIALIST",  CONTEXT_ANALYSIS)
+    INSIGHTS_SYNTHESIZER: str = os.environ.get("LLM_INSIGHTS_SYNTHESIZER", CONTEXT_ANALYSIS)
+    INSIGHTS_CRITIC: str      = os.environ.get("LLM_INSIGHTS_CRITIC",      CONTEXT_ANALYSIS)
+
     # ── Default temperatures ─────────────────────────────────────────────────
 
     class Temp:
@@ -82,6 +88,10 @@ _ROLE_MAP: dict[str, tuple[str, float]] = {
     "manager":            (LLMConfig.MANAGER,            LLMConfig.Temp.PRECISE),
     "service_planner":    (LLMConfig.SERVICE_PLANNER,    LLMConfig.Temp.ROUTING),
     "service_agent":      (LLMConfig.SERVICE_AGENT,      LLMConfig.Temp.ANALYSIS),
+    "insights_planner":      (LLMConfig.INSIGHTS_PLANNER,     LLMConfig.Temp.ROUTING),
+    "insights_specialist":   (LLMConfig.INSIGHTS_SPECIALIST,  LLMConfig.Temp.ANALYSIS),
+    "insights_synthesizer":  (LLMConfig.INSIGHTS_SYNTHESIZER, LLMConfig.Temp.ANALYSIS),
+    "insights_critic":       (LLMConfig.INSIGHTS_CRITIC,      LLMConfig.Temp.ROUTING),
 }
 
 

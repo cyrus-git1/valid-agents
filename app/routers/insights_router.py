@@ -17,10 +17,39 @@ from uuid import UUID
 
 from app import core_client
 from app.models.base import TenantScopedRequest
+from app.models.api.insights_diagnostic import DiagnosticRequest
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/insights", tags=["insights"])
+
+
+# ── Multi-agent diagnostic ───────────────────────────────────────────────
+
+
+@router.post("/diagnostic")
+def run_diagnostic(req: DiagnosticRequest):
+    """Multi-agent insights diagnostic: planner → 5 specialists in parallel → synthesizer → critic.
+
+    Returns the v2 unified report plus a `pipeline` audit section. Cached for 12 hours
+    keyed by (tenant, client, sorted(survey_ids), study_id, sha256(focus_query), critic_enabled).
+    """
+    from app.agents.insights.orchestrator import run_diagnostic_pipeline
+
+    try:
+        return run_diagnostic_pipeline(
+            tenant_id=str(req.tenant_id),
+            client_id=str(req.client_id),
+            focus_query=req.focus_query,
+            survey_ids=[str(s) for s in (req.survey_ids or [])],
+            study_id=str(req.study_id) if req.study_id else None,
+            client_profile=req.client_profile,
+            parallel=req.parallel,
+            critic_enabled=req.critic_enabled,
+        )
+    except Exception as e:
+        logger.exception("Insights diagnostic pipeline failed")
+        raise HTTPException(status_code=500, detail=f"Diagnostic pipeline failed: {e}")
 
 
 # ── Evidence-backed Q&A ───────────────────────────────────────────────────

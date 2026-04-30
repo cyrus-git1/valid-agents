@@ -296,88 +296,6 @@ def create_insights_tools(
             logger.warning("compute_confidence_intervals failed: %s", e)
             return []
 
-    @tool
-    def run_strategic_analysis() -> Dict[str, Any]:
-        """Run strategic analysis across all available data sources.
-
-        Searches KB for strategic themes using hybrid ranking, combines
-        with all available summaries (tenant, document, and topic level).
-        """
-        context = core_client.get_context_summary(
-            tenant_id=tenant_id, client_id=client_id,
-        )
-
-        # Gather document-level and topic-level summaries for richer context
-        extra_summary_parts: List[str] = []
-        try:
-            all_summaries = core_client.list_summaries(
-                tenant_id=tenant_id, client_id=client_id,
-            )
-            for s in all_summaries.get("summaries", []):
-                st = s.get("source_type", "")
-                if st in ("DocumentSummary", "TopicSummary") and s.get("summary"):
-                    label = s.get("topic") or s.get("document_id") or st
-                    extra_summary_parts.append(f"[{st}: {label}] {s['summary'][:300]}")
-        except Exception:
-            pass
-
-        strategic_queries = [
-            "strategy goals challenges opportunities market position",
-            "competitive advantage strengths weaknesses threats",
-            "products services offerings value proposition",
-        ]
-
-        all_docs = []
-        for q in strategic_queries:
-            try:
-                docs = core_client.search_graph(
-                    tenant_id=tenant_id, client_id=client_id,
-                    query=q, top_k=10, hop_limit=1,
-                    boost_pinned=True,
-                    exclude_status=["archived", "deprecated"],
-                    recency_weight=0.2,
-                )
-                all_docs.extend(docs)
-            except Exception:
-                pass
-
-        if not context and not all_docs and not extra_summary_parts:
-            return {"error": "No data available", "executive_summary": "", "action_points": []}
-
-        kb_context = "\n\n---\n\n".join(
-            f"[Source {i+1}]\n{d.page_content}" for i, d in enumerate(all_docs[:20])
-        ) if all_docs else "(No KB content)"
-
-        summary_text = context.get("summary", "") if context else ""
-        if extra_summary_parts:
-            summary_text += "\n\n" + "\n".join(extra_summary_parts)
-        topics = context.get("topics", []) if context else []
-
-        from app.prompts.strategic_analysis_prompts import STRATEGIC_ANALYSIS_PROMPT
-        llm = get_llm("context_analysis")
-        chain = STRATEGIC_ANALYSIS_PROMPT | llm | StrOutputParser()
-
-        try:
-            import json
-            raw = chain.invoke({
-                "kg_context": kb_context,
-                "context_summary": summary_text,
-                "transcript_context": "(No transcripts available — use KB content only)",
-                "transcript_count": "0",
-                "web_context": "(No web search performed)",
-                "profile_section": "",
-                "depth_instructions": "Provide a foundational strategic overview based on available documentation.",
-            })
-            return json.loads(raw)
-        except Exception as e:
-            logger.warning("run_strategic_analysis LLM failed: %s", e)
-            return {
-                "executive_summary": summary_text,
-                "convergent_themes": topics,
-                "action_points": [],
-                "sources_used": {"kg_chunks_retrieved": len(all_docs), "context_summary_available": context is not None},
-            }
-
     # ── Gap tool ────────────────────────────────────────────────────────
 
     @tool
@@ -622,7 +540,6 @@ def create_insights_tools(
         analyze_sentiment,
         extract_transcript_insights,
         compute_confidence_intervals,
-        run_strategic_analysis,
         recommend_enrichment,
         # Scope-aware additions ↓
         compute_quantitative_metrics,

@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.agents.service_agent import run_service_agent, stream_service_agent
+from app.agents.service_agent import stream_service_agent
 from app.agents.valid_agent import stream_valid_agent
 from app.agents.persona_agent import run_persona_agent
 from app.agents.enrichment_agent import run_enrichment_agent
@@ -55,34 +55,6 @@ class AgentQueryRequest(BaseModel):
     client_id: UUID
     input: str = Field(..., description="User query or request")
     client_profile: Optional[Dict[str, Any]] = None
-
-
-class AgentQueryResponse(BaseModel):
-    intent: str
-    output: str
-    sources: List[Dict[str, Any]] = Field(default_factory=list)
-    confidence: Optional[float] = None
-
-
-@agent_router.post("/query", response_model=AgentQueryResponse, deprecated=True)
-def agent_query(req: AgentQueryRequest) -> AgentQueryResponse:
-    """Deprecated — use POST /agent/stream instead for SSE streaming."""
-    try:
-        result = run_service_agent(
-            request=req.input,
-            tenant_id=str(req.tenant_id),
-            client_id=str(req.client_id),
-            client_profile=req.client_profile,
-        )
-    except Exception as e:
-        logger.exception("Agent query failed")
-        raise HTTPException(status_code=500, detail=f"Agent query failed: {e}")
-    return AgentQueryResponse(
-        intent=result.get("intent", "unknown"),
-        output=result.get("output", ""),
-        sources=result.get("sources", []),
-        confidence=result.get("confidence"),
-    )
 
 
 @agent_router.post("/stream")
